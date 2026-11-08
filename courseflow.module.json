@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "cx",
+  "name": "超星学习通",
+  "version": "0.1.0",
+  "moduleApi": 1,
+  "engines": { "framework": ">=0.1.5 <0.2.0" },
+  "runtime": { "engine": "binary", "entry": "main.py", "files": ["cx", "LICENSE", "NOTICE.md", "requirements.txt"] },
+  "platform": {
+    "id": "cx", "name": "超星学习通", "short": "学习通", "login": ["qr", "password"],
+    "operations": ["study", "answer"], "unit_kinds": ["video", "audio", "document", "reading", "empty"], "max_speed": 1.5,
+    "presentation": { "tabs": [{"id":"study","label":"学习目录"},{"id":"answer","label":"章节测验"},{"id":"records","label":"执行记录"}] },
+    "keepalive_seconds": 300
+  },
+  "permissions": { "network": ["chaoxing.com", "*.chaoxing.com"], "browser": false, "ai": false, "question_bank": true, "storage": "module" }
+}
