@@ -269,6 +269,13 @@ class Platform:
         duration=number(blob.get('duration')); begin=max(0,number(blob.get('vbegin'))); vend=number(blob.get('vend'))
         end=min(duration,vend) if vend>0 else duration
         url=str(blob.get('reportUrl') or '')
+        report_url=urlparse(url)
+        # The mobile player may return an HTTP report URL although its host supports HTTPS.
+        if report_url.scheme == 'http' and report_url.hostname == 'mooc1-api.chaoxing.com' and report_url.port is None:
+            url=report_url._replace(scheme='https').geturl()
+            report_url=urlparse(url)
+        if report_url.scheme != 'https' or not report_url.hostname or not (report_url.hostname == 'chaoxing.com' or report_url.hostname.endswith('.chaoxing.com')):
+            raise Fault('platform_protocol_changed','视频上报地址不安全或无效')
         if duration<=0 or end<=begin or not url: raise Fault('platform_protocol_changed','视频时长、截取范围或上报地址无效')
         return {**blob,'duration':duration,'begin':begin,'end':end,'clip':'%s_%s'%(begin,vend if vend>0 else duration),'reportUrl':url,'objectid':blob.get('objectid') or blob.get('objectId') or obj,'jobid':str(blob.get('jobid') or blob.get('jobId') or ''),'interval':max(2,number(blob.get('reportTimeInterval'),60)),'position':max(begin,min(end,number(blob.get('playTime')))),'otherInfo':str(blob.get('otherInfo') or job.get('otherinfo') or job.get('otherInfo') or '')}
 

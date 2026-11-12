@@ -139,6 +139,17 @@ class ModuleTests(unittest.TestCase):
         self.host.responses=[{'msg':'接口未开放'},{'status':'success','dtoken':'synthetic','duration':100}]
         info=self.p.video_info('s',RAW,job)
         self.assertEqual(info['position'],12); self.assertEqual(info['otherInfo'],'nodeId_44-')
+    def test_mobile_http_report_url_uses_https_before_study(self):
+        job=self.job(); job['mid']='m'
+        self.host.responses=[{'data':{'videoObject':{'duration':100,'jobid':'j1','objectid':'o1','reportUrl':'http://mooc1-api.chaoxing.com/mooc-ans/multimedia/log/a/3/token','playTime':12}}}]
+        info=self.p.video_info('s',RAW,job)
+        self.assertEqual(info['reportUrl'],'https://mooc1-api.chaoxing.com/mooc-ans/multimedia/log/a/3/token')
+        self.assertEqual(info['position'],12)
+    def test_untrusted_http_report_url_is_rejected(self):
+        job=self.job(); job['mid']='m'
+        self.host.responses=[{'data':{'videoObject':{'duration':100,'jobid':'j1','objectid':'o1','reportUrl':'http://example.net/log'}}}]
+        with self.assertRaisesRegex(Fault,'视频上报地址不安全'):
+            self.p.video_info('s',RAW,job)
     def test_document_empty_response_uses_readback(self):
         self.job('document'); raw={'attachments':[{'jobid':'j1','type':'document','isPassed':True,'property':{}}]}
         self.host.responses=['','mArg='+json.dumps(raw)+';']
