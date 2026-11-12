@@ -9,8 +9,8 @@
 需要 Python ≥ 3.11。把依赖环境放在源码和已安装模块之外；以下以 uv 为例，系统已有兼容 Python 时可改用 `python -m venv` 和 pip。
 
 ```sh
-uv venv "$HOME/.local/share/courseflow-module-runtimes/cx-0.1.0" --python 3.13
-uv pip install --python "$HOME/.local/share/courseflow-module-runtimes/cx-0.1.0/bin/python" -r requirements.txt
+uv venv "$HOME/.local/share/courseflow-module-runtimes/cx-0.1.1" --python 3.13
+uv pip install --python "$HOME/.local/share/courseflow-module-runtimes/cx-0.1.1/bin/python" -r requirements.txt
 chmod +x main.py
 ```
 
@@ -19,7 +19,7 @@ chmod +x main.py
 ```sh
 export CF_DATA_DIR="$HOME/.local/share/courseflow-local/data"
 npm run cli -- module add /绝对路径/courseflow-chaoxing
-npm run cli -- module config cx "{\"source\":\"live\",\"python\":\"$HOME/.local/share/courseflow-module-runtimes/cx-0.1.0/bin/python\"}"
+npm run cli -- module config cx "{\"source\":\"live\",\"python\":\"$HOME/.local/share/courseflow-module-runtimes/cx-0.1.1/bin/python\"}"
 npm run cli -- module enable cx
 ```
 

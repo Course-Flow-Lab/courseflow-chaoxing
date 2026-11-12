@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "cx",
   "name": "超星学习通",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "moduleApi": 1,
   "engines": { "framework": ">=0.1.5 <0.2.0" },
   "runtime": { "engine": "binary", "entry": "main.py", "files": ["cx", "LICENSE", "NOTICE.md", "requirements.txt"] },
