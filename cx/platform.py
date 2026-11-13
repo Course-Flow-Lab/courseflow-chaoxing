@@ -2,6 +2,8 @@ import base64
 import hashlib
 import json
 import re
+import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import urlparse
 from . import parser
@@ -53,7 +55,8 @@ class Platform:
 
     def request(self, session, url, data=None, method='GET', stage='read', binary=False, mobile=False, optional=False):
         headers = {'User-Agent': MOBILE_UA if mobile else UA, 'Referer': HOME+'/visit/interaction'}
-        params = {'session': session, 'url': url, 'method': method, 'headers': headers, 'stage': stage, 'commit': stage in ('open','draft','submit','study'), 'binary': binary}
+        params = {'session': session, 'url': url, 'method': method, 'headers': headers, 'stage': stage, 'commit': stage in ('open','draft','submit','study'), 'binary': binary,
+                  'timeout_ms': 3000 if optional else 10000 if stage == 'read' else 25000}
         if data is not None:
             params.update(encoding='form' if method == 'POST' else 'query', body={k: 'true' if v is True else 'false' if v is False else '' if v is None else str(v) for k,v in data.items()})
         try:
@@ -138,32 +141,46 @@ class Platform:
         session = p['session']
         cursor = p.get('cursor')
         if cursor is None:
+            cached = self.state(session,'course_listing')
+            if cached and cached.get('session') == session and self.now()-cached.get('updated',0)<30:
+                return {'courses':self.public_courses(cached['courses'])}
             folders = ['0']+parser.folders(self.request(session,HOME+'/visit/interaction'))[:99]
-            self.state(session,'courses',[])
+            self.state(session,'course_scan',[])
             cursor = {'folders':list(dict.fromkeys(folders)),'index':0}
         folders,index = cursor['folders'],number(cursor['index'])
         text = self.request(session,HOME+'/visit/courselistdata',{'courseType':1,'courseFolderId':folders[index],'query':'','superstarClass':0},'POST')
         values = parser.courses(text)
-        existing = self.state(session,'courses') or []
+        existing = self.state(session,'course_scan') or []
         seen = {(c['courseId'],c['clazzId']) for c in existing}
         values = [c for c in values if (c['courseId'],c['clazzId']) not in seen]
-        self.state(session,'courses',existing+values)
-        public = [{'id':str(c['courseId']),'recruit_id':str(c['clazzId']),'name':c['title'],'kind':'chaoxing','family':'chaoxing','kind_label':'超星课程','outline_available':True,'progress':None} for c in values]
+        self.state(session,'course_scan',existing+values)
+        if index+1 >= len(folders):
+            self.state(session,'courses',existing+values)
+            self.state(session,'course_listing',{'session':session,'updated':self.now(),'courses':existing+values})
+        public = self.public_courses(values)
         return {'courses':public,'next_cursor':{'folders':folders,'index':index+1} if index+1<len(folders) else None}
+
+    @staticmethod
+    def public_courses(values):
+        return [{'id':str(c['courseId']),'recruit_id':str(c['clazzId']),'name':c['title'],'kind':'chaoxing','family':'chaoxing','kind_label':'超星课程','outline_available':True,'progress':None} for c in values]
 
     def outline(self,p,field):
         session,public = p['session'],p['course']
         course = self.course(session,public)
-        key = 'outline:'+self.course_key(public)
+        completed_key = 'outline:'+self.course_key(public)
+        key = completed_key+':'+field
         cache = self.state(session,key)
         cursor = p.get('cursor')
         if cursor is None:
-            if cache and cache.get('complete') and self.now()-cache.get('updated',0)<60:
+            cache = self.state(session,completed_key)
+            if cache and cache.get('cpi') == course['cpi'] and cache.get('complete') and self.now()-cache.get('updated',0)<60:
                 return {field:cache[field]}
             text = self.request(session,HOME+'/mycourse/studentcourse',{'courseid':course['courseId'],'clazzid':course['clazzId'],'cpi':course['cpi'],'ut':'s'})
-            cache = {'points':parser.points(text),'units':[],'papers':[],'finished':[],'unfinished':[],'nodes':{},'seen':{},'complete':False,'updated':self.now()}
+            cache = {'points':parser.points(text),'units':[],'papers':[],'finished':[],'unfinished':[],'nodes':{},'seen':{},'complete':False,'updated':self.now(),'scan':uuid.uuid4().hex,'cpi':course['cpi']}
             self.state(session,key,cache)
-            return {field:[],'next_cursor':{'phase':'nodes'}}
+            return {field:[],'next_cursor':{'phase':'nodes','scan':cache['scan']}}
+        if not cache or cursor.get('scan') != cache.get('scan'):
+            raise Fault('platform_unavailable','目录扫描已更新，请重新刷新当前课程')
         phase = cursor['phase']
         if phase == 'nodes':
             fields = 'id,course.fields(id,knowledge.fields(id,name,finishcount,unfinishcount,clickcount).type(video))'
@@ -184,17 +201,35 @@ class Platform:
             new = found-set(cache[phase]); cache[phase] = sorted(set(cache[phase])|found)
             next_cursor = {'phase':phase,'page':page+1} if len(found)>=20 and new and page<20 else {'phase':'unfinished','page':1} if phase=='finished' else {'phase':'cards','point':0,'card':0}
         else:
-            index,card = number(cursor.get('point')),number(cursor.get('card'))
-            if index>=len(cache['points']):
-                cache.update(complete=True,updated=self.now()); self.state(session,key,cache)
-                return {field:[]}
-            point = cache['points'][index]
-            units,papers = [],[]
+            return self.outline_cards(p,field,course,key,completed_key,cache)
+        self.state(session,key,cache)
+        return {field:[],'next_cursor':{**next_cursor,'scan':cache['scan']}}
+
+    def outline_cards(self,p,field,course,key,completed_key,cache):
+        session,public,cursor = p['session'],p['course'],p['cursor']
+        index = number(cursor.get('point'))
+        active = list(cursor.get('active') or [])
+        if 'card' in cursor and index < len(cache['points']):
+            active.append([index,number(cursor['card'])]); index += 1
+        while len(active)<4 and index<len(cache['points']):
+            active.append([index,0]); index+=1
+        context = getattr(self.host,'context',None)
+        deadline = getattr(context,'deadline',None)
+        def read_card(item):
+            point_index,card = item
+            point = cache['points'][point_index]
+            if point['locked']: return None
+            if deadline is not None: self.host.context.deadline = deadline
+            return self.request(session,BASE+'/mooc-ans/knowledge/cards',{'clazzid':course['clazzId'],'courseid':course['courseId'],'knowledgeid':point['id'],'ut':'s','cpi':course['cpi'],'v':'2025-0424-1038-3','mooc2':1,'num':card})
+        # 只并发只读卡片；每批最多四张，写入及分页状态仍由调用线程顺序处理。
+        with ThreadPoolExecutor(max_workers=4) as readers:
+            pages = list(readers.map(read_card,active))
+        units,papers,next_active = [],[],[]
+        for (point_index,card),text in zip(active,pages):
+            point = cache['points'][point_index]
             if point['locked']:
                 units.append(self.unit('locked:'+point['id'],point['title'],'empty',point,False,False,'章节尚未解锁，请先完成先修任务后刷新'))
-                next_cursor = {'phase':'cards','point':index+1,'card':0}
             else:
-                text = self.request(session,BASE+'/mooc-ans/knowledge/cards',{'clazzid':course['clazzId'],'courseid':course['courseId'],'knowledgeid':point['id'],'ut':'s','cpi':course['cpi'],'v':'2025-0424-1038-3','mooc2':1,'num':card})
                 jobs,defaults,signature = parser.cards(text)
                 seen = cache['seen'].setdefault(point['id'],[])
                 digest = hashlib.sha256(signature.encode()).hexdigest() if signature else ''
@@ -205,7 +240,6 @@ class Platform:
                         passed = point['finished'] or cache['nodes'].get(point['id'],False)
                         units.append(self.unit(ident,point['title'],'empty',point,passed,not defaults.get('notOpen'),'章节未开放' if defaults.get('notOpen') else ''))
                         self.state(session,'job:'+self.course_key(public)+':'+ident,{'_kind':'empty','_jobid':ident,'property':{},'_defaults':{'knowledgeid':point['id']},'_point':point,'_card':0})
-                    next_cursor = {'phase':'cards','point':index+1,'card':0}
                 else:
                     seen.append(digest)
                     for job in jobs:
@@ -223,14 +257,21 @@ class Platform:
                             item.update(duration_seconds=number(prop.get('duration')) or None,watched_seconds=number(job.get('playTime',prop.get('playTime'))) // 1000,video_id=str(prop.get('objectid') or job.get('objectId') or '') or None)
                             if item['watched_seconds'] and not passed: item['state']='in_progress'
                             units.append(item)
-                    next_cursor = {'phase':'cards','point':index,'card':card+1} if card<19 else {'phase':'cards','point':index+1,'card':0}
-            for group,items in [('units',units),('papers',papers)]:
-                old = {item['id'] for item in cache[group]}
-                cache[group].extend(item for item in items if item['id'] not in old)
-            self.state(session,key,cache)
-            return {field:papers if field=='papers' else units,'next_cursor':next_cursor}
+                    if card<19: next_active.append([point_index,card+1])
+        for group,items in [('units',units),('papers',papers)]:
+            old = {item['id'] for item in cache[group]}
+            fresh = []
+            for item in items:
+                if item['id'] not in old:
+                    old.add(item['id']); fresh.append(item)
+            cache[group].extend(fresh)
+            if group == field: result = fresh
+        complete = index>=len(cache['points']) and not next_active
+        if complete:
+            cache.update(complete=True,updated=self.now())
+            self.state(session,completed_key,cache)
         self.state(session,key,cache)
-        return {field:[],'next_cursor':next_cursor}
+        return {field:result,'next_cursor':None if complete else {'phase':'cards','point':index,'active':next_active,'scan':cache.get('scan')}}
 
     @staticmethod
     def unit(ident,name,kind,point,passed,selectable=True,note=''):

@@ -2,15 +2,15 @@
 
 独立的超星学习通平台模块，以 `December172/chaoxing` 为功能基线，保留播放窗口、任务完成判断、字体解码和作答恢复修正。模块不导入旧仓库，也不包含旧 Web UI、数据库或账号文件。
 
-宿主为 [courseflow-framework](https://github.com/Course-Flow-Lab/courseflow-framework) ≥ 0.1.5，模块 API 为 1，模块编号为 `cx`。通过标准输入输出交换 NDJSON JSON-RPC；网络、Cookie、加密状态、任务队列、题库和模型调用由框架管理。
+宿主为 [courseflow-framework](https://github.com/Course-Flow-Lab/courseflow-framework) ≥ 0.1.8，模块 API 为 1，模块编号为 `cx`。通过标准输入输出交换 NDJSON JSON-RPC；网络、Cookie、加密状态、任务队列、题库和模型调用由框架管理。
 
 ## 安装
 
 需要 Python ≥ 3.11。把依赖环境放在源码和已安装模块之外；以下以 uv 为例，系统已有兼容 Python 时可改用 `python -m venv` 和 pip。
 
 ```sh
-uv venv "$HOME/.local/share/courseflow-module-runtimes/cx-0.1.1" --python 3.13
-uv pip install --python "$HOME/.local/share/courseflow-module-runtimes/cx-0.1.1/bin/python" -r requirements.txt
+uv venv "$HOME/.local/share/courseflow-module-runtimes/cx-0.1.2" --python 3.13
+uv pip install --python "$HOME/.local/share/courseflow-module-runtimes/cx-0.1.2/bin/python" -r requirements.txt
 chmod +x main.py
 ```
 
@@ -19,7 +19,7 @@ chmod +x main.py
 ```sh
 export CF_DATA_DIR="$HOME/.local/share/courseflow-local/data"
 npm run cli -- module add /绝对路径/courseflow-chaoxing
-npm run cli -- module config cx "{\"source\":\"live\",\"python\":\"$HOME/.local/share/courseflow-module-runtimes/cx-0.1.1/bin/python\"}"
+npm run cli -- module config cx "{\"source\":\"live\",\"python\":\"$HOME/.local/share/courseflow-module-runtimes/cx-0.1.2/bin/python\"}"
 npm run cli -- module enable cx
 ```
 
@@ -32,6 +32,14 @@ npm run cli -- module enable cx
 | `finish_seekable` | `false` | 仅对平台明确返回 `fastforward=true` 的音视频使用拖动和完成上报；其他视频按真实时间运行 |
 
 源码目录不需要构建。安装时只复制清单、入口、`cx/`、许可和依赖清单。入口关闭 Python 字节码缓存，避免运行后改变安装指纹。
+
+## 查询与超时
+
+课程列表缓存 30 秒，完整目录缓存 60 秒，学习目录与测验目录复用同一份完整结果。每批最多并行读取四张章节卡片，保留多卡片分页、先修锁和官方完成状态。协议由独立读取线程分发，不同会话可同时处理；登录保留独立工作线程，同一会话内的操作仍顺序执行。
+
+普通只读请求预算为 10 秒，可选移动端统计为 3 秒，写入保留 25 秒；一次请求的全部重定向与响应体共用预算。模块根据宿主公布的调用上限提前结束过期调用，已过期的排队请求不会继续出网。0.1.2 需要配套更新 Framework 至 0.1.8 或更高版本。网络失败后可重新刷新目录，未知结果的开卷与交卷不会自动重发。
+
+配套 Framework 获取课程列表时只复用已有目录进度，不再为了补齐进度扫描所有课程；只有进入课程或执行相关任务时读取目录。
 
 ## 能力
 
