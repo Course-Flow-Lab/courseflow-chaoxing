@@ -156,7 +156,7 @@ class ModuleTests(unittest.TestCase):
         result=self.p.study({'session':'s','course':COURSE,'unit':{'id':'j1'},'options':{'execution_id':'x'}})
         self.assertEqual(result['status'],'completed'); self.assertEqual(self.host.requests[0]['stage'],'study')
     def test_work_card_pass_flag_alone_is_not_submitted(self):
-        self.p.state('s','outline:11/22',{'points':[POINT],'units':[],'papers':[],'finished':[],'unfinished':[],'nodes':{},'seen':{},'complete':False})
+        self.p.state('s','outline:11/22:papers',{'points':[POINT],'units':[],'papers':[],'finished':[],'unfinished':[],'nodes':{},'seen':{},'complete':False})
         self.host.responses=['mArg='+json.dumps({'attachments':[{'jobid':'work-55','type':'workid','isPassed':True,'property':{'title':'合成作业'}}]})+';']
         result=self.p.outline({'session':'s','course':COURSE,'cursor':{'phase':'cards','point':0,'card':0}},'papers')
         self.assertFalse(result['papers'][0]['done']); self.assertTrue(result['papers'][0]['available'])
