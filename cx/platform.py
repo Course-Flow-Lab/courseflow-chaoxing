@@ -173,10 +173,10 @@ class Platform:
         cursor = p.get('cursor')
         if cursor is None:
             cache = self.state(session,completed_key)
-            if not p.get('refresh') and cache and cache.get('cpi') == course['cpi'] and cache.get('complete') and self.now()-cache.get('updated',0)<60:
+            if not p.get('refresh') and cache and cache.get('format') == 2 and cache.get('cpi') == course['cpi'] and cache.get('complete') and self.now()-cache.get('updated',0)<60:
                 return {field:cache[field]}
             text = self.request(session,HOME+'/mycourse/studentcourse',{'courseid':course['courseId'],'clazzid':course['clazzId'],'cpi':course['cpi'],'ut':'s'})
-            cache = {'points':parser.points(text),'units':[],'papers':[],'finished':[],'unfinished':[],'nodes':{},'seen':{},'complete':False,'updated':self.now(),'scan':uuid.uuid4().hex,'cpi':course['cpi']}
+            cache = {'format':2,'points':parser.points(text),'units':[],'papers':[],'finished':[],'unfinished':[],'nodes':{},'seen':{},'complete':False,'updated':self.now(),'scan':uuid.uuid4().hex,'cpi':course['cpi']}
             self.state(session,key,cache)
             return {field:[],'next_cursor':{'phase':'nodes','scan':cache['scan']}}
         if not cache or cursor.get('scan') != cache.get('scan'):
@@ -228,7 +228,12 @@ class Platform:
         for (point_index,card),text in zip(active,pages):
             point = cache['points'][point_index]
             if point['locked']:
-                units.append(self.unit('locked:'+point['id'],point['title'],'empty',point,False,False,'章节尚未解锁，请先完成先修任务后刷新'))
+                prerequisite = point.get('prerequisite', False)
+                item = self.unit('locked:'+point['id'],point['title'],'empty',point,False,False,
+                                 '完成前置任务后自动学习' if prerequisite else '章节未开放')
+                if prerequisite:
+                    item['selectable_after_unlock'] = True
+                units.append(item)
             else:
                 jobs,defaults,signature = parser.cards(text)
                 seen = cache['seen'].setdefault(point['id'],[])
