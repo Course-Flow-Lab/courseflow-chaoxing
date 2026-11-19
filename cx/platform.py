@@ -173,7 +173,7 @@ class Platform:
         cursor = p.get('cursor')
         if cursor is None:
             cache = self.state(session,completed_key)
-            if cache and cache.get('cpi') == course['cpi'] and cache.get('complete') and self.now()-cache.get('updated',0)<60:
+            if not p.get('refresh') and cache and cache.get('cpi') == course['cpi'] and cache.get('complete') and self.now()-cache.get('updated',0)<60:
                 return {field:cache[field]}
             text = self.request(session,HOME+'/mycourse/studentcourse',{'courseid':course['courseId'],'clazzid':course['clazzId'],'cpi':course['cpi'],'ut':'s'})
             cache = {'points':parser.points(text),'units':[],'papers':[],'finished':[],'unfinished':[],'nodes':{},'seen':{},'complete':False,'updated':self.now(),'scan':uuid.uuid4().hex,'cpi':course['cpi']}
