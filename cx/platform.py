@@ -173,10 +173,10 @@ class Platform:
         cursor = p.get('cursor')
         if cursor is None:
             cache = self.state(session,completed_key)
-            if not p.get('refresh') and cache and cache.get('format') == 2 and cache.get('cpi') == course['cpi'] and cache.get('complete') and self.now()-cache.get('updated',0)<60:
+            if not p.get('refresh') and cache and cache.get('format') == 3 and cache.get('cpi') == course['cpi'] and cache.get('complete') and self.now()-cache.get('updated',0)<60:
                 return {field:cache[field]}
             text = self.request(session,HOME+'/mycourse/studentcourse',{'courseid':course['courseId'],'clazzid':course['clazzId'],'cpi':course['cpi'],'ut':'s'})
-            cache = {'format':2,'points':parser.points(text),'units':[],'papers':[],'finished':[],'unfinished':[],'nodes':{},'seen':{},'complete':False,'updated':self.now(),'scan':uuid.uuid4().hex,'cpi':course['cpi']}
+            cache = {'format':3,'points':parser.points(text),'units':[],'papers':[],'finished':[],'unfinished':[],'nodes':{},'seen':{},'complete':False,'updated':self.now(),'scan':uuid.uuid4().hex,'cpi':course['cpi']}
             self.state(session,key,cache)
             return {field:[],'next_cursor':{'phase':'nodes','scan':cache['scan']}}
         if not cache or cursor.get('scan') != cache.get('scan'):
@@ -280,7 +280,9 @@ class Platform:
 
     @staticmethod
     def unit(ident,name,kind,point,passed,selectable=True,note=''):
-        return {'id':ident,'name':name,'chapter_id':point['id'],'chapter_name':point['title'],'lesson_id':ident,'kind':kind,'state':'completed' if passed else 'not_started','selectable':selectable,'selectable_note':note,'duration_seconds':None,'watched_seconds':0,'video_id':None}
+        return {'id':ident,'name':name,'chapter_id':point['id'],'chapter_name':point['title'],
+                **({'chapter_order':point['order']} if 'order' in point else {}),
+                'lesson_id':ident,'kind':kind,'state':'completed' if passed else 'not_started','selectable':selectable,'selectable_note':note,'duration_seconds':None,'watched_seconds':0,'video_id':None}
 
     def job(self,p):
         ident = (p.get('unit') or {}).get('id') or p.get('paper_id')

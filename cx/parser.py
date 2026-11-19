@@ -44,7 +44,7 @@ def points(text):
         tips = ' '.join(plain(item) for item in cls(node, 'bntHoverTips'))
         locked = '解锁' in tips
         prerequisite = locked and bool(re.search(r'(?:完成|通过).*?(?:之前|前置|先修|上一|上节|前一)', tips))
-        result.append({'id': match[1], 'title': plain(names[0]), 'locked': locked,
+        result.append({'id': match[1], 'title': plain(names[0]), 'order': len(result), 'locked': locked,
                        'prerequisite': prerequisite, 'finished': '已完成' in tips})
     return result
 def cards(text):
