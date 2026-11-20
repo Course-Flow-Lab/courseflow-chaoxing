@@ -160,6 +160,8 @@ class ModuleTests(unittest.TestCase):
         self.host.responses=['mArg='+json.dumps({'attachments':[{'jobid':'work-55','type':'workid','isPassed':True,'property':{'title':'合成作业'}}]})+';']
         result=self.p.outline({'session':'s','course':COURSE,'cursor':{'phase':'cards','point':0,'card':0}},'papers')
         self.assertFalse(result['papers'][0]['done']); self.assertTrue(result['papers'][0]['available'])
+        self.assertFalse(result['papers'][0]['task_point'])
+        self.assertEqual(result['papers'][0]['chapter_id'], POINT['id'])
     def test_fixture_never_calls_network(self):
         p=Platform(self.host,{'source':'fixture'})
         self.assertEqual(p.dispatch('catalog.courses',{'session':'fixture'})['courses'][0]['id'],'synthetic-cx-course')
