@@ -173,10 +173,10 @@ class Platform:
         cursor = p.get('cursor')
         if cursor is None:
             cache = self.state(session,completed_key)
-            if not p.get('refresh') and cache and cache.get('format') == 3 and cache.get('cpi') == course['cpi'] and cache.get('complete') and self.now()-cache.get('updated',0)<60:
+            if not p.get('refresh') and cache and cache.get('format') == 4 and cache.get('cpi') == course['cpi'] and cache.get('complete') and self.now()-cache.get('updated',0)<60:
                 return {field:cache[field]}
             text = self.request(session,HOME+'/mycourse/studentcourse',{'courseid':course['courseId'],'clazzid':course['clazzId'],'cpi':course['cpi'],'ut':'s'})
-            cache = {'format':3,'points':parser.points(text),'units':[],'papers':[],'finished':[],'unfinished':[],'nodes':{},'seen':{},'complete':False,'updated':self.now(),'scan':uuid.uuid4().hex,'cpi':course['cpi']}
+            cache = {'format':4,'points':parser.points(text),'units':[],'papers':[],'finished':[],'unfinished':[],'nodes':{},'seen':{},'complete':False,'updated':self.now(),'scan':uuid.uuid4().hex,'cpi':course['cpi']}
             self.state(session,key,cache)
             return {field:[],'next_cursor':{'phase':'nodes','scan':cache['scan']}}
         if not cache or cursor.get('scan') != cache.get('scan'):
@@ -255,7 +255,12 @@ class Platform:
                         name = prop.get('name') or prop.get('title') or ident
                         if kind == 'work':
                             passed = ident in cache['finished'] and ident not in cache['unfinished']
-                            papers.append({'id':ident,'name':name,'category':'章节测验','available':not passed,'done':passed,'can_redo':False,'can_review':False,'reason':'已完成' if passed else '提交状态未知时由作答页及回读核对','score':None,'attempts_left':None,'ends_at':None})
+                            task_point = (ident in cache['finished'] or ident in cache['unfinished'] or
+                                          parser.flag(job.get('job')) or parser.flag(job.get('isJob')))
+                            papers.append({'id':ident,'name':name,'category':'章节测验','available':not passed,'done':passed,
+                                           'chapter_id':point['id'],'chapter_order':point_index,'task_point':task_point,
+                                           'can_redo':False,'can_review':False,'reason':'已完成' if passed else '提交状态未知时由作答页及回读核对',
+                                           'score':None,'attempts_left':None,'ends_at':None})
                         else:
                             public_kind = 'video' if kind=='live' else kind if kind in ('video','audio','document','reading') else 'empty'
                             item = self.unit(ident,name,public_kind,point,passed,kind!='unsupported','请在官方页面处理' if kind=='unsupported' else '')

@@ -59,7 +59,7 @@ class CatalogLatencyTests(unittest.TestCase):
     def test_parallel_cards_preserve_order_extra_pages_locks_and_shared_cache(self):
         points = [{**POINT, 'id': str(i), 'order': i-1, 'title': '合成章节'+str(i)} for i in range(1, 7)]
         points[-1].update(locked=True, prerequisite=True)
-        cache = {'format': 3, 'points': points, 'units': [], 'papers': [], 'finished': [], 'unfinished': [], 'nodes': {},
+        cache = {'format': 4, 'points': points, 'units': [], 'papers': [], 'finished': [], 'unfinished': [], 'nodes': {},
                  'seen': {}, 'scan': 'synthetic-scan', 'complete': False, 'cpi': RAW['cpi']}
         self.platform.state('s', 'outline:11/22:units', cache)
         gate = threading.Barrier(4)
