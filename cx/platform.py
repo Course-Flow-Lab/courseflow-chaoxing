@@ -24,15 +24,25 @@ def number(value, default=0):
     try: return int(float(value))
     except (ValueError, TypeError): return default
 
-def job_ids(data):
-    result = set()
+def job_records(data):
     if isinstance(data, dict):
-        ident = data.get('jobid', data.get('jobId'))
-        if ident is not None: result.add(str(ident))
-        for value in data.values(): result.update(job_ids(value))
+        if data.get('jobid', data.get('jobId')) is not None:
+            yield data
+        for value in data.values():
+            yield from job_records(value)
     elif isinstance(data, list):
-        for value in data: result.update(job_ids(value))
-    return result
+        for value in data:
+            yield from job_records(value)
+
+def job_ids(data):
+    return {str(row.get('jobid', row.get('jobId'))) for row in job_records(data)}
+
+def submitted_work(data):
+    # 5 is already graded below the passing score. It must never be treated as a draft.
+    return str(data.get('stuStatus')) in ('4', '5')
+
+def work_attempt_id(data):
+    return str(data.get('workAnswerId') or data.get('answerId') or '')
 
 def video_enc(clazz, uid, job, obj, seconds, duration, clip):
     text = '[%s][%s][%s][%s][%s][d_yHJ!$pdA~5][%s][%s]' % (clazz, uid, job, obj, int(seconds)*1000, int(duration)*1000, clip)
@@ -422,6 +432,59 @@ class Platform:
         if cache: cache['updated']=0; self.state(p['session'],key,cache)
         return {'status':'completed','checkpoint':cp}
 
+    def quiz_job_status(self, session, course, knowledge, job_id, finished):
+        endpoint = 'jobfinishedList' if finished else 'jobunfinishedList'
+        seen = set()
+        for page in range(1, 5):
+            data = self.api(session, MOBILE+'/api/phone/'+endpoint, {
+                'courseid': course['courseId'], 'clazzid': course['clazzId'], 'knowledgeid': knowledge,
+                'jobid': job_id, 'page': page, 'pageSize': 20, 'view': 'json',
+            }, mobile=True, optional=True)
+            if not isinstance(data, (dict, list)) or isinstance(data, dict) and data.get('status') is False:
+                return None
+            rows = list(job_records(data))
+            if not rows and isinstance(data, dict) and not any(isinstance(data.get(key), (dict, list)) for key in ('data', 'list')):
+                return None
+            matches = [row for row in rows if str(row.get('jobid', row.get('jobId'))) == job_id]
+            if matches:
+                return matches
+            ids = {str(row.get('jobid', row.get('jobId'))) for row in rows}
+            if len(ids) < 20 or not ids - seen:
+                return []
+            seen.update(ids)
+        return None  # The gateway can ignore the filters and paginate the whole course.
+
+    def quiz_submission_status(self, p, value, check_retry):
+        if value.get('submission_confirmed'):
+            return 'confirmed'
+        session, public = p['session'], p['course']
+        course = self.course(session, public)
+        job_id, attempt_id = value['job'], value['attempt']['id']
+        job = self.state(session, 'job:'+self.course_key(public)+':'+job_id) or {}
+        knowledge = value['form'].get('knowledgeid') or (job.get('_point') or {}).get('id') or ''
+        finished = self.quiz_job_status(session, course, knowledge, job_id, True)
+        if any(work_attempt_id(row) in ('', attempt_id) for row in finished or []):
+            return 'confirmed'
+        not_submitted = False
+        if check_retry and value.get('submit_intent') and not value.get('submit_retried') and work_attempt_id(value['form']) == attempt_id:
+            unfinished = self.quiz_job_status(session, course, knowledge, job_id, False) or []
+            same_attempt = [row for row in unfinished if work_attempt_id(row) == attempt_id]
+            if any(submitted_work(row) or row.get('submitted') is True for row in same_attempt):
+                return 'confirmed'
+            not_submitted = finished == [] and any(
+                row.get('submitted') is False or row.get('status') in ('未交', '未提交', '已保存')
+                for row in same_attempt
+            )
+        if value.get('submitted_ack') and knowledge and '_card' in job:
+            text = self.request(session, BASE+'/mooc-ans/knowledge/cards', {
+                'clazzid': course['clazzId'], 'courseid': course['courseId'], 'knowledgeid': knowledge,
+                'cpi': course['cpi'], 'num': job['_card'], 'ut': 's', 'mooc2': 1,
+            }, optional=True)
+            cards, _, _ = parser.cards(text or '')
+            if any(card['_jobid'] == job_id and card['_passed'] for card in cards):
+                return 'confirmed'
+        return 'not_submitted' if not_submitted else 'unknown'
+
     def exam(self,method,p):
         session=p['session']; prefix='attempt:'+self.course_key(p['course'])+':'
         if method=='exam.heartbeat': return {'ok':True}
@@ -444,7 +507,18 @@ class Platform:
         if not value: raise Fault('not_found','找不到原作答，请从原任务继续')
         if method=='exam.write':
             submit=p.get('phase')=='submit'
-            if value.get('submit_intent'):
+            retry = p.get('retry') is True
+            if retry:
+                if not submit or not value.get('submit_intent') or value.get('submit_retried'):
+                    raise Fault('platform_protocol_changed', '超星未确认原答卷仍可补交')
+                status = self.quiz_submission_status(p, value, check_retry=True)
+                if status == 'confirmed':
+                    value['submission_confirmed'] = True
+                    self.state(session, key, value)
+                    return {'done': True, 'saved': False, 'submitted': True}
+                if status != 'not_submitted':
+                    raise Fault('platform_protocol_changed', '超星未确认原答卷仍可补交')
+            elif value.get('submit_intent') or value.get('submission_confirmed'):
                 if submit: raise Fault('platform_protocol_changed','交卷请求已发出，必须先回读；不会重复发送')
                 raise Fault('platform_protocol_changed','交卷后不能再覆盖草稿')
             form=dict(value['form']); answers=p.get('answers') or {}; preserve=set(p.get('preserve_ids') or [])
@@ -464,16 +538,25 @@ class Platform:
             # Older module versions may have saved a relative form action at the site root.
             value['action'] = parser.work_action(value['action'])
             if submit:
-                value['submit_intent']=True; self.state(session,key,value)
+                value.update(submit_intent=True, submitted_ack=False)
+                if retry:
+                    value['submit_retried'] = True
+                self.state(session,key,value)
             result=self.api(session,value['action'],form,'POST','submit' if submit else 'draft')
-            if result.get('status') is not True and result.get('success') is not True: raise Fault('platform_rejected','平台未确认作答保存，请核对官方页面')
-            value.update(form=form,submitted_ack=submit); self.state(session,key,value); self.state(session,value['paper_key'],value)
+            acknowledged = result.get('status') is True or result.get('success') is True
+            confirmed = submit and submitted_work(result)
+            if not acknowledged and not confirmed:
+                raise Fault('platform_rejected', '平台未确认交卷' if submit else '平台未确认作答保存，请核对官方页面')
+            value.update(form=form, submitted_ack=submit, submission_confirmed=confirmed)
+            self.state(session,key,value); self.state(session,value['paper_key'],value)
             return {'done':True,'saved':not submit,'submitted':submit}
         if method=='exam.readback':
-            course=self.course(session,p['course'])
-            result=self.api(session,MOBILE+'/api/phone/jobfinishedList',{'courseid':course['courseId'],'clazzid':course['clazzId'],'jobid':value['job'],'page':1,'pageSize':20,'view':'json'},mobile=True,optional=True)
-            confirmed=value['job'] in job_ids(result)
-            return {'confirmed':confirmed,'attempt_id':value['attempt']['id'],'graded_answers':{},'score':None}
+            status = self.quiz_submission_status(p, value, check_retry=p.get('check_retry') is True)
+            if status == 'confirmed' and not value.get('submission_confirmed'):
+                value['submission_confirmed'] = True
+                self.state(session, key, value)
+            return {'confirmed':status == 'confirmed','retryable':status == 'not_submitted',
+                    'attempt_id':value['attempt']['id'],'graded_answers':{},'score':None}
         raise Fault('unsupported_operation','不支持的作答操作')
 
     def fixture_call(self,method,p):
