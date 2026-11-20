@@ -4,6 +4,7 @@ import sys
 import os
 import unittest
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 from cx.platform import Platform, Fault, video_enc
 from cx import parser
 
@@ -143,6 +144,31 @@ class ModuleTests(unittest.TestCase):
         self.assertTrue(self.p.dispatch('exam.write', {**params, 'phase': 'submit', 'retry': True})['submitted'])
         self.assertTrue(self.p.dispatch('exam.readback', params)['confirmed'])
         self.assertEqual([r['stage'] for r in self.host.requests], ['read'])
+    def test_legacy_web_submission_uses_a_fresh_signature_when_mobile_status_is_unavailable(self):
+        text = WORK.replace('addStudentWorkNew"', 'addStudentWorkNewWeb?token=a%2Bb"')
+        value = parser.work(text, {'id': 'work-55', 'name': '合成测验'})
+        value.update(job='work-55', paper_key='paper:11/22:work-55', submitted_ack=True, submit_intent=True)
+        value['form']['workRelationId'] = '55'
+        self.p.state('s', 'attempt:11/22:66', value)
+        params = {'session': 's', 'course': COURSE, 'attempt_id': '66'}
+        unavailable = [Fault('platform_unavailable', 'HTTP 500')] * 2
+        signature = {'standardEnc': 'synthetic-signature', 'status': 0}
+        self.host.responses = [*unavailable, {**signature, 'status': 1}]
+        self.assertFalse(self.p.dispatch('exam.readback', {**params, 'check_retry': True})['retryable'])
+        self.host.responses = [*unavailable, signature]
+        self.assertTrue(self.p.dispatch('exam.readback', {**params, 'check_retry': True})['retryable'])
+
+        self.host.responses = [*unavailable, signature, {'status': True, 'stuStatus': 4}]
+        self.assertTrue(self.p.dispatch('exam.write', {**params, 'phase': 'submit', 'retry': True})['submitted'])
+        posted = self.host.requests[-1]
+        self.assertEqual(posted['stage'], 'submit')
+        self.assertEqual(parse_qs(urlparse(posted['url']).query), {
+            'token': ['a+b'], 'ua': ['pc'], 'formType': ['post'], 'saveStatus': ['1'], 'version': ['1'],
+        })
+        self.assertEqual(posted['body']['standardEnc'], 'synthetic-signature')
+        self.assertEqual(posted['body']['workAnswerId'], '66')
+        self.assertEqual(posted['body']['pyFlag'], '')
+        self.assertTrue(self.p.dispatch('exam.readback', params)['confirmed'])
     def test_video_signature_and_clip_window(self):
         import hashlib
         expected=hashlib.md5(b'[22][7][j1][o1][12000][d_yHJ!$pdA~5][100000][10_20]').hexdigest()
