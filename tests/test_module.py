@@ -4,6 +4,7 @@ import sys
 import os
 import unittest
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 from cx.platform import Platform, Fault, video_enc
 from cx import parser
 
@@ -51,6 +52,30 @@ class ModuleTests(unittest.TestCase):
         q=value['attempt']['questions'][0]
         self.assertEqual(q['text'],'1+1=?'); self.assertEqual(q['answer'],['B']); self.assertEqual(q['options'][1]['text'],'2')
         self.assertEqual(value['form']['workAnswerId'],'66')
+        self.assertEqual(value['action'], parser.BASE + '/mooc-ans/work/addStudentWorkNew')
+    def test_paper_resolves_relative_web_action_and_preserves_query(self):
+        work = WORK.replace('/mooc-ans/work/addStudentWorkNew', 'addStudentWorkNewWeb?workId=55&amp;token=a%2Bb')
+        value = parser.work(work, {'id': 'work-55', 'name': '合成测验'})
+        self.assertEqual(value['action'], parser.BASE + '/mooc-ans/work/addStudentWorkNewWeb?workId=55&token=a%2Bb')
+    def test_draft_repairs_stored_web_action_without_reopening(self):
+        value = parser.work(WORK, {'id': 'work-55', 'name': '合成测验'})
+        old_action = parser.BASE + '/addStudentWorkNewWeb?workId=55&token=a%2Bb'
+        new_action = parser.BASE + '/mooc-ans/work/addStudentWorkNewWeb?workId=55&token=a%2Bb'
+        attempt_key, paper_key = 'attempt:11/22:66', 'paper:11/22:work-55'
+        value.update(action=old_action, job='work-55', paper_key=paper_key)
+        self.p.state('s', attempt_key, value)
+        self.p.state('s', paper_key, value)
+        self.host.responses = [{'status': True}]
+        params = {'session': 's', 'course': COURSE, 'attempt_id': '66', 'phase': 'draft', 'answers': {'q1': ['A']}}
+
+        result = self.p.dispatch('exam.write', params)
+
+        self.assertTrue(result['saved'])
+        self.assertEqual([(r['stage'], r['url']) for r in self.host.requests], [('draft', new_action)])
+        self.assertEqual(self.host.requests[0]['body']['workAnswerId'], '66')
+        self.assertEqual(self.host.requests[0]['body']['answerq1'], 'A')
+        for key in (attempt_key, paper_key):
+            self.assertEqual(self.p.state('s', key)['action'], new_action)
     def test_encrypted_font_without_font_data_stops(self):
         with self.assertRaises(ValueError): parser.work('<style id="cxSecretStyle">bad</style>'+WORK,{'id':'w','name':'w'})
     def test_unknown_open_never_reopens(self):
@@ -71,6 +96,79 @@ class ModuleTests(unittest.TestCase):
         self.host.responses=[{'data':[]},{'data':[{'jobid':'work-55'}]}]
         params={'session':'s','course':COURSE,'attempt_id':'66'}
         self.assertFalse(self.p.dispatch('exam.readback',params)['confirmed']); self.assertTrue(self.p.dispatch('exam.readback',params)['confirmed'])
+    def test_readback_finds_the_quiz_beyond_the_first_finished_page(self):
+        value = parser.work(WORK, {'id': 'work-55', 'name': '合成测验'})
+        value.update(job='work-55')
+        value['form']['knowledgeid'] = '44'
+        self.p.state('s', 'attempt:11/22:66', value)
+        self.host.responses = [
+            {'data': [{'jobId': f'doc-{idx}'} for idx in range(20)]},
+            {'data': [{'jobId': 'work-55', 'workAnswerId': 66}]},
+        ]
+        result = self.p.dispatch('exam.readback', {'session': 's', 'course': COURSE, 'attempt_id': '66'})
+        self.assertTrue(result['confirmed'])
+        self.assertEqual([(r['body']['knowledgeid'], r['body']['page']) for r in self.host.requests], [('44', '1'), ('44', '2')])
+    def test_retry_requires_the_saved_attempt_and_rechecks_before_writing(self):
+        value = parser.work(WORK, {'id': 'work-55', 'name': '合成测验'})
+        value.update(job='work-55', paper_key='paper:11/22:work-55', submit_intent=True)
+        self.p.state('s', 'attempt:11/22:66', value)
+        params = {'session': 's', 'course': COURSE, 'attempt_id': '66'}
+        write = {**params, 'phase': 'submit', 'retry': True, 'answers': {'q1': ['B']}}
+        empty = {'data': []}
+        draft = {'data': [{'jobid': 'work-55', 'workAnswerId': 66, 'status': '已保存'}]}
+        self.host.responses = [empty, {'data': [{'jobid': 'work-55', 'status': '未交'}]}]
+        self.assertFalse(self.p.dispatch('exam.readback', {**params, 'check_retry': True})['retryable'])
+        self.host.responses = [empty, draft]
+        self.assertTrue(self.p.dispatch('exam.readback', {**params, 'check_retry': True})['retryable'])
+
+        self.host.responses = [empty, empty]
+        with self.assertRaisesRegex(Fault, '未确认原答卷仍可补交'):
+            self.p.dispatch('exam.write', write)
+        self.assertFalse(any(r['stage'] == 'submit' for r in self.host.requests))
+
+        self.host.responses = [empty, draft, {'status': True, 'stuStatus': 5}]
+        self.assertTrue(self.p.dispatch('exam.write', write)['submitted'])
+        self.assertTrue(self.p.dispatch('exam.readback', {**params, 'check_retry': True})['confirmed'])
+        with self.assertRaisesRegex(Fault, '未确认原答卷仍可补交'):
+            self.p.dispatch('exam.write', write)
+        submitted = [r for r in self.host.requests if r['stage'] == 'submit']
+        self.assertEqual(len(submitted), 1)
+        self.assertEqual(submitted[0]['body']['workAnswerId'], '66')
+        self.assertEqual(submitted[0]['body']['answerq1'], 'B')
+    def test_retry_accepts_a_confirmation_arriving_before_resubmission(self):
+        value = parser.work(WORK, {'id': 'work-55', 'name': '合成测验'})
+        value.update(job='work-55', submit_intent=True)
+        self.p.state('s', 'attempt:11/22:66', value)
+        params = {'session': 's', 'course': COURSE, 'attempt_id': '66'}
+        self.host.responses = [{'data': [{'jobid': 'work-55', 'workAnswerId': 66}]}]
+        self.assertTrue(self.p.dispatch('exam.write', {**params, 'phase': 'submit', 'retry': True})['submitted'])
+        self.assertTrue(self.p.dispatch('exam.readback', params)['confirmed'])
+        self.assertEqual([r['stage'] for r in self.host.requests], ['read'])
+    def test_legacy_web_submission_uses_a_fresh_signature_when_mobile_status_is_unavailable(self):
+        text = WORK.replace('addStudentWorkNew"', 'addStudentWorkNewWeb?token=a%2Bb"')
+        value = parser.work(text, {'id': 'work-55', 'name': '合成测验'})
+        value.update(job='work-55', paper_key='paper:11/22:work-55', submitted_ack=True, submit_intent=True)
+        value['form']['workRelationId'] = '55'
+        self.p.state('s', 'attempt:11/22:66', value)
+        params = {'session': 's', 'course': COURSE, 'attempt_id': '66'}
+        unavailable = [Fault('platform_unavailable', 'HTTP 500')] * 2
+        signature = {'standardEnc': 'synthetic-signature', 'status': 0}
+        self.host.responses = [*unavailable, {**signature, 'status': 1}]
+        self.assertFalse(self.p.dispatch('exam.readback', {**params, 'check_retry': True})['retryable'])
+        self.host.responses = [*unavailable, signature]
+        self.assertTrue(self.p.dispatch('exam.readback', {**params, 'check_retry': True})['retryable'])
+
+        self.host.responses = [*unavailable, signature, {'status': True, 'stuStatus': 4}]
+        self.assertTrue(self.p.dispatch('exam.write', {**params, 'phase': 'submit', 'retry': True})['submitted'])
+        posted = self.host.requests[-1]
+        self.assertEqual(posted['stage'], 'submit')
+        self.assertEqual(parse_qs(urlparse(posted['url']).query), {
+            'token': ['a+b'], 'ua': ['pc'], 'formType': ['post'], 'saveStatus': ['1'], 'version': ['1'],
+        })
+        self.assertEqual(posted['body']['standardEnc'], 'synthetic-signature')
+        self.assertEqual(posted['body']['workAnswerId'], '66')
+        self.assertEqual(posted['body']['pyFlag'], '')
+        self.assertTrue(self.p.dispatch('exam.readback', params)['confirmed'])
     def test_video_signature_and_clip_window(self):
         import hashlib
         expected=hashlib.md5(b'[22][7][j1][o1][12000][d_yHJ!$pdA~5][100000][10_20]').hexdigest()
@@ -160,6 +258,8 @@ class ModuleTests(unittest.TestCase):
         self.host.responses=['mArg='+json.dumps({'attachments':[{'jobid':'work-55','type':'workid','isPassed':True,'property':{'title':'合成作业'}}]})+';']
         result=self.p.outline({'session':'s','course':COURSE,'cursor':{'phase':'cards','point':0,'card':0}},'papers')
         self.assertFalse(result['papers'][0]['done']); self.assertTrue(result['papers'][0]['available'])
+        self.assertFalse(result['papers'][0]['task_point'])
+        self.assertEqual(result['papers'][0]['chapter_id'], POINT['id'])
     def test_fixture_never_calls_network(self):
         p=Platform(self.host,{'source':'fixture'})
         self.assertEqual(p.dispatch('catalog.courses',{'session':'fixture'})['courses'][0]['id'],'synthetic-cx-course')

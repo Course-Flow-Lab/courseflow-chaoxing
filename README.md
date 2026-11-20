@@ -9,8 +9,8 @@
 需要 Python ≥ 3.11。把依赖环境放在源码和已安装模块之外；以下以 uv 为例，系统已有兼容 Python 时可改用 `python -m venv` 和 pip。
 
 ```sh
-uv venv "$HOME/.local/share/courseflow-module-runtimes/cx-0.1.2" --python 3.13
-uv pip install --python "$HOME/.local/share/courseflow-module-runtimes/cx-0.1.2/bin/python" -r requirements.txt
+uv venv "$HOME/.local/share/courseflow-module-runtimes/cx-0.1.4" --python 3.13
+uv pip install --python "$HOME/.local/share/courseflow-module-runtimes/cx-0.1.4/bin/python" -r requirements.txt
 chmod +x main.py
 ```
 
@@ -19,7 +19,7 @@ chmod +x main.py
 ```sh
 export CF_DATA_DIR="$HOME/.local/share/courseflow-local/data"
 npm run cli -- module add /绝对路径/courseflow-chaoxing
-npm run cli -- module config cx "{\"source\":\"live\",\"python\":\"$HOME/.local/share/courseflow-module-runtimes/cx-0.1.2/bin/python\"}"
+npm run cli -- module config cx "{\"source\":\"live\",\"python\":\"$HOME/.local/share/courseflow-module-runtimes/cx-0.1.4/bin/python\"}"
 npm run cli -- module enable cx
 ```
 
@@ -45,6 +45,8 @@ npm run cli -- module enable cx
 
 - 课程文件夹、班级与章节目录；分页短调用避免一次扫描整门课超时。
 - 视频、音频、文档、阅读和空章节；直播观看记录与完成状态回读。
+- 配套框架和网页支持预选有先修要求的章节，并按超星目录顺序补选前序未完成的学习单元。「选择未完成单元」也会选中这些章节。前置任务完成后自动接上已选章节，仍需人工处理时可以在处理后继续同一任务。
+- 创建超星学习任务时，可选「模型自动作答并提交前置测验」。前序学习完成后，若所选章节仍未解锁，框架会检查超星任务点中的章节测验，沿用已有答案并使用课程工作台配置的模型补答。交卷确认后重新读取目录，由超星的解锁状态决定是否接续。
 - 章节测验的单选、多选、判断、填空、简答；原有作答保留、人工补答、草稿、确认交卷和结果回读。
 - 平台字体解码、康熙部首规范化、选项辅助文本解析和题目图片。无法解码时暂停，不把乱码发送给模型。
 - 已确认答案由宿主题库复用；模型服务由框架统一配置。外部题库协议在 [courseflow-question-bank](https://github.com/Course-Flow-Lab/courseflow-question-bank) 中提供适配接口，模块不存放供应商密钥。
