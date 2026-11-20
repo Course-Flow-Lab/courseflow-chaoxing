@@ -51,6 +51,30 @@ class ModuleTests(unittest.TestCase):
         q=value['attempt']['questions'][0]
         self.assertEqual(q['text'],'1+1=?'); self.assertEqual(q['answer'],['B']); self.assertEqual(q['options'][1]['text'],'2')
         self.assertEqual(value['form']['workAnswerId'],'66')
+        self.assertEqual(value['action'], parser.BASE + '/mooc-ans/work/addStudentWorkNew')
+    def test_paper_resolves_relative_web_action_and_preserves_query(self):
+        work = WORK.replace('/mooc-ans/work/addStudentWorkNew', 'addStudentWorkNewWeb?workId=55&amp;token=a%2Bb')
+        value = parser.work(work, {'id': 'work-55', 'name': '合成测验'})
+        self.assertEqual(value['action'], parser.BASE + '/mooc-ans/work/addStudentWorkNewWeb?workId=55&token=a%2Bb')
+    def test_draft_repairs_stored_web_action_without_reopening(self):
+        value = parser.work(WORK, {'id': 'work-55', 'name': '合成测验'})
+        old_action = parser.BASE + '/addStudentWorkNewWeb?workId=55&token=a%2Bb'
+        new_action = parser.BASE + '/mooc-ans/work/addStudentWorkNewWeb?workId=55&token=a%2Bb'
+        attempt_key, paper_key = 'attempt:11/22:66', 'paper:11/22:work-55'
+        value.update(action=old_action, job='work-55', paper_key=paper_key)
+        self.p.state('s', attempt_key, value)
+        self.p.state('s', paper_key, value)
+        self.host.responses = [{'status': True}]
+        params = {'session': 's', 'course': COURSE, 'attempt_id': '66', 'phase': 'draft', 'answers': {'q1': ['A']}}
+
+        result = self.p.dispatch('exam.write', params)
+
+        self.assertTrue(result['saved'])
+        self.assertEqual([(r['stage'], r['url']) for r in self.host.requests], [('draft', new_action)])
+        self.assertEqual(self.host.requests[0]['body']['workAnswerId'], '66')
+        self.assertEqual(self.host.requests[0]['body']['answerq1'], 'A')
+        for key in (attempt_key, paper_key):
+            self.assertEqual(self.p.state('s', key)['action'], new_action)
     def test_encrypted_font_without_font_data_stops(self):
         with self.assertRaises(ValueError): parser.work('<style id="cxSecretStyle">bad</style>'+WORK,{'id':'w','name':'w'})
     def test_unknown_open_never_reopens(self):

@@ -61,8 +61,9 @@ class Platform:
             params.update(encoding='form' if method == 'POST' else 'query', body={k: 'true' if v is True else 'false' if v is False else '' if v is None else str(v) for k,v in data.items()})
         try:
             response = self.host.call('cw.net.fetch', params)
-            if response['status'] != 200:
-                raise Fault('platform_unavailable', '超星接口暂不可用')
+            status = response['status']
+            if status != 200:
+                raise Fault('platform_unavailable', f'超星接口暂不可用（HTTP {status}）')
             body = response.get('body', '')
             if not binary and ('antispiderShowVerify' in body or re.search(r'<title>\s*(?:超星)?登录', body)):
                 raise Fault('platform_verification_required', '请在超星官方页面完成验证后继续')
@@ -460,6 +461,8 @@ class Platform:
                 form['answertype'+ident]=layout['code']
             form['answerwqbid']=','.join(q['id'] for q in value['attempt']['questions'])+','
             form['pyFlag']='' if submit else '1'
+            # Older module versions may have saved a relative form action at the site root.
+            value['action'] = parser.work_action(value['action'])
             if submit:
                 value['submit_intent']=True; self.state(session,key,value)
             result=self.api(session,value['action'],form,'POST','submit' if submit else 'draft')

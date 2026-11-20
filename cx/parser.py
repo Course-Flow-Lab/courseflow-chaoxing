@@ -67,6 +67,17 @@ def cards(text):
         result.append({**item, 'property': prop, '_kind': kind, '_jobid': job, '_passed': flag(item.get('isPassed')) or kind == 'reading' and flag(prop.get('read')), '_defaults': defaults})
     return result, defaults, json.dumps(attachments, sort_keys=True, ensure_ascii=False) if attachments else ''
 
+def work_action(action):
+    url = urljoin(BASE, action or '/mooc-ans/work/addStudentWorkNew')
+    target = urlparse(url)
+    origin = urlparse(BASE)
+    if (target.scheme, target.netloc) == (origin.scheme, origin.netloc) and target.path in (
+        '/addStudentWorkNew', '/addStudentWorkNewWeb',
+    ):
+        return target._replace(path='/mooc-ans/work' + target.path).geturl()
+    return url
+
+
 def work(text, paper):
     root = tree(text)
     forms = root.xpath('.//form')
@@ -114,4 +125,4 @@ def work(text, paper):
     if not questions:
         raise ValueError('作业没有可识别的题目')
     ident = saved.get('workAnswerId') or saved.get('id') or saved.get('workId') or paper['id']
-    return {'attempt': {'id': str(ident), 'paper_id': paper['id'], 'name': paper['name'], 'questions': questions, 'expires_at': None}, 'form': saved, 'layout': layouts, 'action': urljoin(BASE, form.get('action') or '/mooc-ans/work/addStudentWorkNew')}
+    return {'attempt': {'id': str(ident), 'paper_id': paper['id'], 'name': paper['name'], 'questions': questions, 'expires_at': None}, 'form': saved, 'layout': layouts, 'action': work_action(form.get('action'))}
