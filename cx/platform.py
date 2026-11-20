@@ -5,7 +5,7 @@ import re
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 from . import parser
 
 BASE = 'https://mooc1.chaoxing.com'
@@ -14,6 +14,8 @@ MOBILE = 'https://mooc1-api.chaoxing.com'
 PASSPORT = 'https://passport2.chaoxing.com'
 UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/129.0 Safari/537.36'
 MOBILE_UA = 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/129.0 Mobile Safari/537.36'
+WEB_SUBMIT_PATH = '/mooc-ans/work/addStudentWorkNewWeb'
+WEB_SUBMIT_FLAGS = {'ua': 'pc', 'formType': 'post', 'saveStatus': '1', 'version': '1'}
 
 class Fault(Exception):
     def __init__(self, code, message):
@@ -63,8 +65,8 @@ class Platform:
     def now(self): return self.host.call('cw.clock.now', {})['now']
     def identity(self, session): return self.host.call('cw.session.identity', {'session': session})
 
-    def request(self, session, url, data=None, method='GET', stage='read', binary=False, mobile=False, optional=False):
-        headers = {'User-Agent': MOBILE_UA if mobile else UA, 'Referer': HOME+'/visit/interaction'}
+    def request(self, session, url, data=None, method='GET', stage='read', binary=False, mobile=False, optional=False, referer=None):
+        headers = {'User-Agent': MOBILE_UA if mobile else UA, 'Referer': referer or HOME+'/visit/interaction'}
         params = {'session': session, 'url': url, 'method': method, 'headers': headers, 'stage': stage, 'commit': stage in ('open','draft','submit','study'), 'binary': binary,
                   'timeout_ms': 3000 if optional else 10000 if stage == 'read' else 25000}
         if data is not None:
@@ -82,8 +84,8 @@ class Platform:
             if optional: return None
             raise
 
-    def api(self, session, url, data=None, method='GET', stage='read', mobile=False, optional=False):
-        body = self.request(session,url,data,method,stage,mobile=mobile,optional=optional)
+    def api(self, session, url, data=None, method='GET', stage='read', mobile=False, optional=False, referer=None):
+        body = self.request(session,url,data,method,stage,mobile=mobile,optional=optional,referer=referer)
         if body is None: return None
         try: return json.loads(body)
         except ValueError:
@@ -454,9 +456,22 @@ class Platform:
             seen.update(ids)
         return None  # The gateway can ignore the filters and paginate the whole course.
 
+    def quiz_web_signature(self, session, course, form):
+        work_id, answer_id = form.get('workRelationId'), work_attempt_id(form)
+        if not work_id or not answer_id:
+            return None
+        result = self.api(session, BASE+'/mooc-ans/work/isExpire', {
+            'courseId': course['courseId'], 'classId': course['clazzId'], 'cpi': course['cpi'],
+            'workRelationId': work_id, 'workId': work_id, 'answerId': answer_id,
+        }, optional=True, referer=BASE+'/')
+        if not isinstance(result, dict) or str(result.get('status')) != '0':
+            return None
+        signature = result.get('standardEnc')
+        return signature if isinstance(signature, str) and signature else None
+
     def quiz_submission_status(self, p, value, check_retry):
         if value.get('submission_confirmed'):
-            return 'confirmed'
+            return 'confirmed', None
         session, public = p['session'], p['course']
         course = self.course(session, public)
         job_id, attempt_id = value['job'], value['attempt']['id']
@@ -464,13 +479,16 @@ class Platform:
         knowledge = value['form'].get('knowledgeid') or (job.get('_point') or {}).get('id') or ''
         finished = self.quiz_job_status(session, course, knowledge, job_id, True)
         if any(work_attempt_id(row) in ('', attempt_id) for row in finished or []):
-            return 'confirmed'
+            return 'confirmed', None
         not_submitted = False
-        if check_retry and value.get('submit_intent') and not value.get('submit_retried') and work_attempt_id(value['form']) == attempt_id:
+        form = value['form']
+        draft_only = not value.get('submit_intent') and form.get('pyFlag') == '1'
+        can_retry = check_retry and not value.get('submit_retried') and work_attempt_id(form) == attempt_id
+        if can_retry:
             unfinished = self.quiz_job_status(session, course, knowledge, job_id, False) or []
             same_attempt = [row for row in unfinished if work_attempt_id(row) == attempt_id]
             if any(submitted_work(row) or row.get('submitted') is True for row in same_attempt):
-                return 'confirmed'
+                return 'confirmed', None
             not_submitted = finished == [] and any(
                 row.get('submitted') is False or row.get('status') in ('未交', '未提交', '已保存')
                 for row in same_attempt
@@ -482,8 +500,18 @@ class Platform:
             }, optional=True)
             cards, _, _ = parser.cards(text or '')
             if any(card['_jobid'] == job_id and card['_passed'] for card in cards):
-                return 'confirmed'
-        return 'not_submitted' if not_submitted else 'unknown'
+                return 'confirmed', None
+        action = urlparse(parser.work_action(value['action']))
+        if can_retry and action.path == WEB_SUBMIT_PATH:
+            # Older web requests could acknowledge a draft without the browser's final submission flags.
+            legacy_ack = value.get('submitted_ack') and 'saveStatus' not in parse_qs(action.query, keep_blank_values=True)
+            if not_submitted or legacy_ack or draft_only:
+                signature = self.quiz_web_signature(session, course, form)
+                if signature:
+                    return 'retryable', signature
+        elif not_submitted:
+            return 'retryable', None
+        return 'unknown', None
 
     def exam(self,method,p):
         session=p['session']; prefix='attempt:'+self.course_key(p['course'])+':'
@@ -508,15 +536,16 @@ class Platform:
         if method=='exam.write':
             submit=p.get('phase')=='submit'
             retry = p.get('retry') is True
+            signature = None
             if retry:
-                if not submit or not value.get('submit_intent') or value.get('submit_retried'):
+                if not submit or value.get('submit_retried'):
                     raise Fault('platform_protocol_changed', '超星未确认原答卷仍可补交')
-                status = self.quiz_submission_status(p, value, check_retry=True)
+                status, signature = self.quiz_submission_status(p, value, check_retry=True)
                 if status == 'confirmed':
                     value['submission_confirmed'] = True
                     self.state(session, key, value)
                     return {'done': True, 'saved': False, 'submitted': True}
-                if status != 'not_submitted':
+                if status != 'retryable':
                     raise Fault('platform_protocol_changed', '超星未确认原答卷仍可补交')
             elif value.get('submit_intent') or value.get('submission_confirmed'):
                 if submit: raise Fault('platform_protocol_changed','交卷请求已发出，必须先回读；不会重复发送')
@@ -538,6 +567,16 @@ class Platform:
             # Older module versions may have saved a relative form action at the site root.
             value['action'] = parser.work_action(value['action'])
             if submit:
+                action = urlparse(value['action'])
+                if action.path == WEB_SUBMIT_PATH:
+                    signature = signature or self.quiz_web_signature(session, self.course(session, p['course']), form)
+                    if not signature:
+                        raise Fault('platform_rejected', '超星未返回原答卷的交卷签名')
+                    form['standardEnc'] = signature
+                    params = parse_qs(action.query, keep_blank_values=True)
+                    flags = {key: item for key, item in WEB_SUBMIT_FLAGS.items() if key not in params}
+                    query = '&'.join(part for part in (action.query, urlencode(flags)) if part)
+                    value['action'] = action._replace(query=query).geturl()
                 value.update(submit_intent=True, submitted_ack=False)
                 if retry:
                     value['submit_retried'] = True
@@ -551,11 +590,11 @@ class Platform:
             self.state(session,key,value); self.state(session,value['paper_key'],value)
             return {'done':True,'saved':not submit,'submitted':submit}
         if method=='exam.readback':
-            status = self.quiz_submission_status(p, value, check_retry=p.get('check_retry') is True)
+            status, _ = self.quiz_submission_status(p, value, check_retry=p.get('check_retry') is True)
             if status == 'confirmed' and not value.get('submission_confirmed'):
                 value['submission_confirmed'] = True
                 self.state(session, key, value)
-            return {'confirmed':status == 'confirmed','retryable':status == 'not_submitted',
+            return {'confirmed':status == 'confirmed','retryable':status == 'retryable',
                     'attempt_id':value['attempt']['id'],'graded_answers':{},'score':None}
         raise Fault('unsupported_operation','不支持的作答操作')
 
