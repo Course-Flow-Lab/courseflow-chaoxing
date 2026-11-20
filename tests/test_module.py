@@ -95,6 +95,54 @@ class ModuleTests(unittest.TestCase):
         self.host.responses=[{'data':[]},{'data':[{'jobid':'work-55'}]}]
         params={'session':'s','course':COURSE,'attempt_id':'66'}
         self.assertFalse(self.p.dispatch('exam.readback',params)['confirmed']); self.assertTrue(self.p.dispatch('exam.readback',params)['confirmed'])
+    def test_readback_finds_the_quiz_beyond_the_first_finished_page(self):
+        value = parser.work(WORK, {'id': 'work-55', 'name': '合成测验'})
+        value.update(job='work-55')
+        value['form']['knowledgeid'] = '44'
+        self.p.state('s', 'attempt:11/22:66', value)
+        self.host.responses = [
+            {'data': [{'jobId': f'doc-{idx}'} for idx in range(20)]},
+            {'data': [{'jobId': 'work-55', 'workAnswerId': 66}]},
+        ]
+        result = self.p.dispatch('exam.readback', {'session': 's', 'course': COURSE, 'attempt_id': '66'})
+        self.assertTrue(result['confirmed'])
+        self.assertEqual([(r['body']['knowledgeid'], r['body']['page']) for r in self.host.requests], [('44', '1'), ('44', '2')])
+    def test_retry_requires_the_saved_attempt_and_rechecks_before_writing(self):
+        value = parser.work(WORK, {'id': 'work-55', 'name': '合成测验'})
+        value.update(job='work-55', paper_key='paper:11/22:work-55', submit_intent=True)
+        self.p.state('s', 'attempt:11/22:66', value)
+        params = {'session': 's', 'course': COURSE, 'attempt_id': '66'}
+        write = {**params, 'phase': 'submit', 'retry': True, 'answers': {'q1': ['B']}}
+        empty = {'data': []}
+        draft = {'data': [{'jobid': 'work-55', 'workAnswerId': 66, 'status': '已保存'}]}
+        self.host.responses = [empty, {'data': [{'jobid': 'work-55', 'status': '未交'}]}]
+        self.assertFalse(self.p.dispatch('exam.readback', {**params, 'check_retry': True})['retryable'])
+        self.host.responses = [empty, draft]
+        self.assertTrue(self.p.dispatch('exam.readback', {**params, 'check_retry': True})['retryable'])
+
+        self.host.responses = [empty, empty]
+        with self.assertRaisesRegex(Fault, '未确认原答卷仍可补交'):
+            self.p.dispatch('exam.write', write)
+        self.assertFalse(any(r['stage'] == 'submit' for r in self.host.requests))
+
+        self.host.responses = [empty, draft, {'status': True, 'stuStatus': 5}]
+        self.assertTrue(self.p.dispatch('exam.write', write)['submitted'])
+        self.assertTrue(self.p.dispatch('exam.readback', {**params, 'check_retry': True})['confirmed'])
+        with self.assertRaisesRegex(Fault, '未确认原答卷仍可补交'):
+            self.p.dispatch('exam.write', write)
+        submitted = [r for r in self.host.requests if r['stage'] == 'submit']
+        self.assertEqual(len(submitted), 1)
+        self.assertEqual(submitted[0]['body']['workAnswerId'], '66')
+        self.assertEqual(submitted[0]['body']['answerq1'], 'B')
+    def test_retry_accepts_a_confirmation_arriving_before_resubmission(self):
+        value = parser.work(WORK, {'id': 'work-55', 'name': '合成测验'})
+        value.update(job='work-55', submit_intent=True)
+        self.p.state('s', 'attempt:11/22:66', value)
+        params = {'session': 's', 'course': COURSE, 'attempt_id': '66'}
+        self.host.responses = [{'data': [{'jobid': 'work-55', 'workAnswerId': 66}]}]
+        self.assertTrue(self.p.dispatch('exam.write', {**params, 'phase': 'submit', 'retry': True})['submitted'])
+        self.assertTrue(self.p.dispatch('exam.readback', params)['confirmed'])
+        self.assertEqual([r['stage'] for r in self.host.requests], ['read'])
     def test_video_signature_and_clip_window(self):
         import hashlib
         expected=hashlib.md5(b'[22][7][j1][o1][12000][d_yHJ!$pdA~5][100000][10_20]').hexdigest()
