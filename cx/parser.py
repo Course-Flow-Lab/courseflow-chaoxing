@@ -42,7 +42,10 @@ def points(text):
         if not match or not names:
             continue
         tips = ' '.join(plain(item) for item in cls(node, 'bntHoverTips'))
-        result.append({'id': match[1], 'title': plain(names[0]), 'locked': '解锁' in tips, 'finished': '已完成' in tips})
+        locked = '解锁' in tips
+        prerequisite = locked and bool(re.search(r'(?:完成|通过).*?(?:之前|前置|先修|上一|上节|前一)', tips))
+        result.append({'id': match[1], 'title': plain(names[0]), 'order': len(result), 'locked': locked,
+                       'prerequisite': prerequisite, 'finished': '已完成' in tips})
     return result
 def cards(text):
     if '章节未开放' in text:
@@ -63,6 +66,17 @@ def cards(text):
             continue
         result.append({**item, 'property': prop, '_kind': kind, '_jobid': job, '_passed': flag(item.get('isPassed')) or kind == 'reading' and flag(prop.get('read')), '_defaults': defaults})
     return result, defaults, json.dumps(attachments, sort_keys=True, ensure_ascii=False) if attachments else ''
+
+def work_action(action):
+    url = urljoin(BASE, action or '/mooc-ans/work/addStudentWorkNew')
+    target = urlparse(url)
+    origin = urlparse(BASE)
+    if (target.scheme, target.netloc) == (origin.scheme, origin.netloc) and target.path in (
+        '/addStudentWorkNew', '/addStudentWorkNewWeb',
+    ):
+        return target._replace(path='/mooc-ans/work' + target.path).geturl()
+    return url
+
 
 def work(text, paper):
     root = tree(text)
@@ -111,4 +125,4 @@ def work(text, paper):
     if not questions:
         raise ValueError('作业没有可识别的题目')
     ident = saved.get('workAnswerId') or saved.get('id') or saved.get('workId') or paper['id']
-    return {'attempt': {'id': str(ident), 'paper_id': paper['id'], 'name': paper['name'], 'questions': questions, 'expires_at': None}, 'form': saved, 'layout': layouts, 'action': urljoin(BASE, form.get('action') or '/mooc-ans/work/addStudentWorkNew')}
+    return {'attempt': {'id': str(ident), 'paper_id': paper['id'], 'name': paper['name'], 'questions': questions, 'expires_at': None}, 'form': saved, 'layout': layouts, 'action': work_action(form.get('action'))}

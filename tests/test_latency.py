@@ -57,9 +57,9 @@ class CatalogLatencyTests(unittest.TestCase):
         self.assertEqual(len(self.platform.courses({'session': 's'})['courses']), 2)
 
     def test_parallel_cards_preserve_order_extra_pages_locks_and_shared_cache(self):
-        points = [{**POINT, 'id': str(i), 'title': '合成章节'+str(i)} for i in range(1, 7)]
-        points[-1]['locked'] = True
-        cache = {'points': points, 'units': [], 'papers': [], 'finished': [], 'unfinished': [], 'nodes': {},
+        points = [{**POINT, 'id': str(i), 'order': i-1, 'title': '合成章节'+str(i)} for i in range(1, 7)]
+        points[-1].update(locked=True, prerequisite=True)
+        cache = {'format': 4, 'points': points, 'units': [], 'papers': [], 'finished': [], 'unfinished': [], 'nodes': {},
                  'seen': {}, 'scan': 'synthetic-scan', 'complete': False, 'cpi': RAW['cpi']}
         self.platform.state('s', 'outline:11/22:units', cache)
         gate = threading.Barrier(4)
@@ -83,8 +83,10 @@ class CatalogLatencyTests(unittest.TestCase):
             if not cursor: break
         else: self.fail('目录分页没有结束')
         self.assertEqual([item['id'] for item in units], ['1-0', '2-0', '3-0', '4-0', '1-1', 'empty:5', 'locked:6'])
+        self.assertEqual([item['chapter_order'] for item in units], [0, 1, 2, 3, 0, 4, 5])
         self.assertEqual(units[1]['state'], 'completed')
         self.assertFalse(units[-1]['selectable'])
+        self.assertTrue(units[-1]['selectable_after_unlock'])
         self.assertNotIn((6, 0), seen)
         self.assertEqual(len(seen), 10)
         self.assertEqual(self.platform.outline({'session': 's', 'course': COURSE}, 'units')['units'], units)
