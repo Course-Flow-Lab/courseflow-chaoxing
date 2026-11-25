@@ -9,17 +9,17 @@
 需要 Python ≥ 3.11。把依赖环境放在源码和已安装模块之外；以下以 uv 为例，系统已有兼容 Python 时可改用 `python -m venv` 和 pip。
 
 ```sh
-uv venv "$HOME/workspace/courseflow/module-runtimes/cx-0.1.4" --python 3.13
-uv pip install --python "$HOME/workspace/courseflow/module-runtimes/cx-0.1.4/bin/python" -r requirements.txt
+uv venv "$(pwd)/../module-runtimes/cx-0.1.4" --python 3.13
+uv pip install --python "$(pwd)/../module-runtimes/cx-0.1.4/bin/python" -r requirements.txt
 chmod +x main.py
 ```
 
 在框架目录中操作。已有本机服务时，先停止服务，CLI 使用同一个外部数据目录；不要同时启动两个使用相同数据目录的实例。
 
 ```sh
-export CF_DATA_DIR="$HOME/workspace/courseflow/local/data"
-npm run cli -- module add "$HOME/workspace/courseflow/courseflow-chaoxing"
-npm run cli -- module config cx "{\"source\":\"live\",\"python\":\"$HOME/workspace/courseflow/module-runtimes/cx-0.1.4/bin/python\"}"
+export CF_DATA_DIR="$(pwd)/../local/data"
+npm run cli -- module add /绝对路径/courseflow-chaoxing
+npm run cli -- module config cx "{\"source\":\"live\",\"python\":\"$(pwd)/../module-runtimes/cx-0.1.4/bin/python\"}"
 npm run cli -- module enable cx
 ```
 
