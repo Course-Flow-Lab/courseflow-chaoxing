@@ -12,6 +12,15 @@ COURSE={'id':'11','recruit_id':'22','name':'合成课程'}
 RAW={'courseId':'11','clazzId':'22','cpi':'33','title':'合成课程'}
 POINT={'id':'44','title':'合成章节','locked':False,'finished':False}
 WORK='<form action="/mooc-ans/work/addStudentWorkNew"><input name="workId" value="55"><input name="workAnswerId" value="66"><input name="answerq1" value="B"><div class="singleQuesId" data="q1"><div class="TiMu" data="0"><div class="Zy_TItle">1.（2.0分）1+1=?</div><ul><li aria-label="A. 1"></li><li aria-label="B. 2 选择"></li></ul></div></div></form>'
+SHEET_IDENTITY = {'workAnswerId':'66', 'answerId':'66', 'courseId':'11', 'classId':'22',
+                  'cpi':'33', 'knowledgeid':'44', 'jobid':'work-55'}
+SHEET_FIELDS = ''.join(f'<input type="hidden" name="{key}" value="{value}">' for key, value in SHEET_IDENTITY.items())
+DRAFT = WORK.replace('<form action="/mooc-ans/work/addStudentWorkNew">',
+    '<form id="form1" method="post" action="addStudentWorkNewWeb?token=fresh">'+SHEET_FIELDS+
+    '<input name="workRelationId" value="55"><input name="enc_work" value="fresh"><input name="totalQuestionNum" value="synthetic-opaque-count-token">'
+    '<input id="addTimes" value="0"><input id="limitWorkSubmitTimes" value="100">'
+    '<a class="btnSubmit" onclick="btnBlueSubmit();">提交</a>').replace('<input name="workAnswerId" value="66"><input name="answerq1" value="B">', '<input name="answerq1" value="">')
+GRADED = '<title>查看已批阅作业</title><form id="questionErrorForm1">'+SHEET_FIELDS+'<span class="achievement">本次成绩<i>100</i>分</span></form>'
 
 class Host:
     def __init__(self):
@@ -82,6 +91,131 @@ class ModuleTests(unittest.TestCase):
         self.p.state('s','paper:11/22:work-55',{'opening':True})
         with self.assertRaises(Fault): self.p.dispatch('exam.open',{'session':'s','course':COURSE,'paper_id':'work-55'})
         self.assertEqual(self.host.requests,[])
+    def test_open_recognizes_live_submitted_sheet_without_mobile_status_or_rewriting(self):
+        job = {'_jobid': 'work-55', '_kind': 'work', '_point': POINT, '_defaults': {},
+               'property': {'title': '合成测验'}}
+        self.p.state('s', 'job:11/22:work-55', job)
+        page = WORK.replace('<input name="workId"', '<input name="stuStatus" value="4"><input name="workId"')
+        self.host.responses = [page]
+        params = {'session': 's', 'course': COURSE, 'paper_id': 'work-55'}
+        opened = self.p.dispatch('exam.open', params)
+        self.assertEqual(opened['attempt']['id'], '66')
+        self.assertTrue(opened['ready'])
+        for key in ('paper:11/22:work-55', 'attempt:11/22:66'):
+            value = self.p.state('s', key)
+            self.assertTrue(value['submission_confirmed'])
+            self.assertTrue(value['submit_intent'])
+        self.assertTrue(self.p.dispatch('exam.readback', {**params, 'attempt_id': '66'})['confirmed'])
+        with self.assertRaisesRegex(Fault, '交卷后不能再覆盖草稿'):
+            self.p.dispatch('exam.write', {**params, 'attempt_id': '66', 'phase': 'draft', 'answers': {'q1': ['A']}})
+        with self.assertRaisesRegex(Fault, '必须先回读'):
+            self.p.dispatch('exam.write', {**params, 'attempt_id': '66', 'phase': 'submit', 'answers': {'q1': ['A']}})
+        self.assertEqual(self.p.dispatch('exam.open', params), opened)
+        self.assertEqual([r['stage'] for r in self.host.requests], ['open'])
+
+    def test_live_submission_status_outside_form_is_not_sent_as_an_answer_field(self):
+        page = '<input id="stuStatus" value="4">' + WORK
+        value = parser.work(page, {'id': 'work-55', 'name': '合成测验'})
+        self.assertTrue(value['submission_confirmed'])
+        self.assertNotIn('stuStatus', value['form'])
+        for page in (WORK.replace('<form ', '<input id="stuStatus" value="5"><form ', 1),
+                     WORK.replace('<input name="workId"', '<input name="stuStatus" value="5"><input name="workId"')):
+            with self.assertRaisesRegex(ValueError, '低于通过线'):
+                parser.work(page, {'id': 'work-55', 'name': '合成测验'})
+
+    def test_open_unsubmitted_sheet_does_not_infer_submission_from_existing_answers(self):
+        self.p.state('s', 'job:11/22:work-55', {'_jobid': 'work-55', '_kind': 'work', '_point': POINT,
+                     '_defaults': {}, 'property': {'title': '合成测验'}})
+        self.host.responses = [WORK]
+        self.p.dispatch('exam.open', {'session': 's', 'course': COURSE, 'paper_id': 'work-55'})
+        value = self.p.state('s', 'attempt:11/22:66')
+        self.assertFalse(value['submission_confirmed'])
+        self.assertFalse(value['submit_intent'])
+        self.assertEqual(value['attempt']['questions'][0]['answer'], ['B'])
+
+    def historical_quiz(self):
+        paper = {'id':'work-55','name':'合成测验'}
+        self.p.state('s','job:11/22:work-55',{'_jobid':'work-55','_kind':'work','_point':POINT,'_defaults':{},'property':{}})
+        original = parser.work(WORK, paper)
+        original['form']['workRelationId'] = '55'
+        original.update(job='work-55', paper_key='paper:11/22:work-55', submit_intent=True, submitted_ack=True, submission_confirmed=True)
+        self.p.state('s','attempt:11/22:66',original)
+        self.p.state('s',original['paper_key'],original)
+        return original, {'session':'s','course':COURSE,'paper_id':paper['id'],'attempt_id':'66'}
+
+    def test_current_draft_requires_affirmative_evidence_on_the_exact_web_sheet(self):
+        _, p = self.historical_quiz()
+        for page in (WORK, DRAFT.replace('id="addTimes"','id="unknown"'),
+                     DRAFT.replace('id="addTimes" value="0"','id="addTimes" value="1"'),
+                     DRAFT.replace('btnBlueSubmit();','void(0)'),
+                     DRAFT.replace('name="cpi" value="33"','name="cpi" value="34"'),
+                     DRAFT.replace('value="66"','value="67"')):
+            with self.subTest(page=page[:95]):
+                self.host.responses = [page]
+                self.assertEqual(self.p.dispatch('exam.reconcile',p)['status'],'unknown')
+                self.assertIsNone(self.p.state('s','current-draft:11/22:66'))
+        self.host.responses = [GRADED, DRAFT.replace('<form ', '<input name="stuStatus" value="5"><form ',1)]
+        self.assertEqual(self.p.dispatch('exam.reconcile',p),{'status':'submitted','score':100})
+        self.assertEqual(self.p.dispatch('exam.reconcile',p)['status'],'below_pass')
+        self.assertTrue(all(r['method']=='GET' and not r['commit'] for r in self.host.requests))
+
+    def test_reconciled_draft_writes_once_and_reads_the_current_grade_not_the_historical_cache(self):
+        original, p = self.historical_quiz()
+        self.host.responses = [DRAFT]
+        opened = self.p.dispatch('exam.reconcile',p)
+        self.assertEqual(opened['status'],'draft')
+        self.assertEqual(opened['attempt']['questions'][0]['answer'],[])
+        draft = {**p,'reconciled':True,'phase':'draft','answers':{'q1':['B']}}
+        self.assertFalse(self.p.dispatch('exam.readback',draft)['confirmed'])
+        self.host.responses = [DRAFT, {'status':3}, {'status':True}]
+        self.assertTrue(self.p.dispatch('exam.write',draft)['saved'])
+        saved = self.host.requests[-1]
+        self.assertEqual(urlparse(saved['url']).path,'/mooc-ans/work/addStudentWorkNew')
+        query = parse_qs(urlparse(saved['url']).query)
+        self.assertEqual(query['tempsave'],['1'])
+        self.assertEqual(query['totalQuestionNum'],['synthetic-opaque-count-token'])
+        self.assertEqual(saved['body']['pyFlag'],'1')
+        page = DRAFT.replace('name="answerq1" value=""', 'name="answerq1" value="B"')
+        self.host.responses = [page, {'status':3}, {'status':0,'standardEnc':'fresh'}, {'status':True,'stuStatus':4}, page, GRADED]
+        submit = {**draft,'phase':'submit'}
+        self.assertTrue(self.p.dispatch('exam.write',submit)['submitted'])
+        self.assertEqual(self.host.requests[-1]['body']['pyFlag'],'')
+        self.assertFalse(self.p.dispatch('exam.readback',submit)['confirmed'],'A live draft cannot be confirmed by historic or immediate ack')
+        result = self.p.dispatch('exam.readback',submit)
+        self.assertTrue(result['confirmed']); self.assertEqual(result['score'],100)
+        for params in (draft,submit,{**submit,'retry':True}):
+            with self.assertRaises(Fault): self.p.dispatch('exam.write',params)
+        self.assertEqual(self.p.state('s','attempt:11/22:66'),original)
+        self.assertEqual(self.p.state('s',original['paper_key']),original)
+        self.assertEqual([r['stage'] for r in self.host.requests if r['commit']],['draft','submit'])
+
+    def test_reconciled_draft_rechecks_before_every_write_and_stops_for_verification(self):
+        _, p = self.historical_quiz()
+        self.host.responses = [DRAFT]
+        self.p.dispatch('exam.reconcile',p)
+        write = {**p,'reconciled':True,'phase':'draft','answers':{'q1':['B']}}
+        self.host.responses = [DRAFT.replace('name="answerq1" value=""','name="answerq1" value="A"')]
+        with self.assertRaisesRegex(Fault,'已有答案发生变化'): self.p.dispatch('exam.write',write)
+        self.host.responses = [DRAFT, {'status':2}]
+        with self.assertRaisesRegex(Fault,'完成验证'): self.p.dispatch('exam.write',write)
+        self.host.responses = [GRADED]
+        self.assertTrue(self.p.dispatch('exam.write',write)['confirmed'])
+        self.assertTrue(all(not r['commit'] for r in self.host.requests))
+
+    def test_reconciled_submission_with_lost_reply_is_not_automatically_reopened_or_retried(self):
+        _, p = self.historical_quiz()
+        self.host.responses = [DRAFT, DRAFT, {'status':3}, {'status':0,'standardEnc':'fresh'},
+                               Fault('platform_unavailable','synthetic lost response'), DRAFT, DRAFT]
+        self.p.dispatch('exam.reconcile',p)
+        submit = {**p,'reconciled':True,'phase':'submit','answers':{'q1':['B']}}
+        with self.assertRaises(Fault): self.p.dispatch('exam.write',submit)
+        self.assertEqual(self.p.dispatch('exam.reconcile',p)['status'],'unknown')
+        result = self.p.dispatch('exam.readback',{**submit,'check_retry':True})
+        self.assertFalse(result['confirmed']); self.assertFalse(result['retryable'])
+        for retry in (False,True):
+            with self.assertRaises(Fault): self.p.dispatch('exam.write',{**submit,'retry':retry})
+        self.assertEqual([r['stage'] for r in self.host.requests if r['commit']],['submit'])
+
     def test_submit_intent_prevents_retry_after_unknown_result(self):
         value=parser.work(WORK,{'id':'work-55','name':'合成测验'}); value.update(job='work-55',paper_key='paper:11/22:work-55')
         self.p.state('s','attempt:11/22:66',value)

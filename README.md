@@ -9,17 +9,17 @@
 需要 Python ≥ 3.11。把依赖环境放在源码和已安装模块之外；以下以 uv 为例，系统已有兼容 Python 时可改用 `python -m venv` 和 pip。
 
 ```sh
-uv venv "$HOME/.local/share/courseflow-module-runtimes/cx-0.1.4" --python 3.13
-uv pip install --python "$HOME/.local/share/courseflow-module-runtimes/cx-0.1.4/bin/python" -r requirements.txt
+uv venv "$HOME/workspace/courseflow/module-runtimes/cx-0.1.4" --python 3.13
+uv pip install --python "$HOME/workspace/courseflow/module-runtimes/cx-0.1.4/bin/python" -r requirements.txt
 chmod +x main.py
 ```
 
 在框架目录中操作。已有本机服务时，先停止服务，CLI 使用同一个外部数据目录；不要同时启动两个使用相同数据目录的实例。
 
 ```sh
-export CF_DATA_DIR="$HOME/.local/share/courseflow-local/data"
-npm run cli -- module add /绝对路径/courseflow-chaoxing
-npm run cli -- module config cx "{\"source\":\"live\",\"python\":\"$HOME/.local/share/courseflow-module-runtimes/cx-0.1.4/bin/python\"}"
+export CF_DATA_DIR="$HOME/workspace/courseflow/local/data"
+npm run cli -- module add "$HOME/workspace/courseflow/courseflow-chaoxing"
+npm run cli -- module config cx "{\"source\":\"live\",\"python\":\"$HOME/workspace/courseflow/module-runtimes/cx-0.1.4/bin/python\"}"
 npm run cli -- module enable cx
 ```
 
@@ -47,12 +47,15 @@ npm run cli -- module enable cx
 - 视频、音频、文档、阅读和空章节；直播观看记录与完成状态回读。
 - 配套框架和网页支持预选有先修要求的章节，并按超星目录顺序补选前序未完成的学习单元。「选择未完成单元」也会选中这些章节。前置任务完成后自动接上已选章节，仍需人工处理时可以在处理后继续同一任务。
 - 创建超星学习任务时，可选「模型自动作答并提交前置测验」。前序学习完成后，若所选章节仍未解锁，框架会检查超星任务点中的章节测验，沿用已有答案并使用课程工作台配置的模型补答。交卷确认后重新读取目录，由超星的解锁状态决定是否接续。
-- 章节测验的单选、多选、判断、填空、简答；原有作答保留、人工补答、草稿、确认交卷和结果回读。
+- 章节测验的单选、多选、判断、填空、简答；原有作答保留、人工补答、草稿、确认交卷和结果回读。首次读取答卷时，也识别官方页面明确返回的已交卷状态；即使移动端状态接口不可用，也不会将这份答卷重新当作草稿覆盖。
+- 若官方目录中的前置测验仍未完成、但任务保留历史交卷记录，先读取原答卷。仅当同一答卷的正式作答页明确显示可以提交且服务端提交次数为 0 时，才按当前草稿继续，保留历史记录及锁。失败、状态不明确或需要人工验证时不自动重交。
 - 平台字体解码、康熙部首规范化、选项辅助文本解析和题目图片。无法解码时暂停，不把乱码发送给模型。
 - 已确认答案由宿主题库复用；模型服务由框架统一配置。外部题库协议在 [courseflow-question-bank](https://github.com/Course-Flow-Lab/courseflow-question-bank) 中提供适配接口，模块不存放供应商密钥。
 - 按用户加密保存目录、原始任务点和作答状态；暂停或重启后不会累计离线停留时间。未知开卷／交卷不会自动重发。
 
-完整对照见 [功能迁移说明](docs/功能迁移.md)。学习时长到达和 HTTP 成功均不等同于平台确认完成。直播无可靠时长、章节未开放、平台未确认完成时保留原因供人工核对。
+完整对照见 [功能迁移说明](docs/功能迁移.md)。学习时长到达和 HTTP 成功均不等同于平台确认完成；交卷确认也不等同于达到及格线或后续章节已解锁。官方页面明确返回低于通过线时仍暂停，不会绕过要求或自动原样重交。直播无可靠时长、章节未开放、平台未确认完成时保留原因供人工核对。
+
+0.1.10 保留 0.1.2–0.1.9 的检查点格式；升级后的暂停任务可以在详情中显式迁移。历史交卷记录不等同于当前目录完成；同一份答卷只有经官方明确确认仍可提交才继续，未知状态不重交。
 
 ## 离线验证
 

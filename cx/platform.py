@@ -267,9 +267,10 @@ class Platform:
                         prop = job['property']; kind = job['_kind']
                         name = prop.get('name') or prop.get('title') or ident
                         if kind == 'work':
-                            passed = ident in cache['finished'] and ident not in cache['unfinished']
                             task_point = (ident in cache['finished'] or ident in cache['unfinished'] or
                                           parser.flag(job.get('job')) or parser.flag(job.get('isJob')))
+                            passed = ident not in cache['unfinished'] and (
+                                ident in cache['finished'] or task_point and point['finished'])
                             papers.append({'id':ident,'name':name,'category':'章节测验','available':not passed,'done':passed,
                                            'chapter_id':point['id'],'chapter_order':point_index,'task_point':task_point,
                                            'can_redo':False,'can_review':False,'reason':'已完成' if passed else '提交状态未知时由作答页及回读核对',
@@ -513,8 +514,54 @@ class Platform:
             return 'retryable', None
         return 'unknown', None
 
+    def quiz_page(self, session, course, job, stage='read'):
+        return self.request(session, BASE+'/mooc-ans/api/work', {
+            'api': 1, 'workId': job['_jobid'].removeprefix('work-'), 'jobid': job['_jobid'], 'originJobId': job['_jobid'],
+            'needRedirect': 'true', 'skipHeader': 'true', 'knowledgeid': job['_point']['id'],
+            'ktoken': job['_defaults'].get('ktoken', ''), 'cpi': course['cpi'], 'ut': 's',
+            'clazzId': course['clazzId'], 'type': '', 'enc': job.get('enc', ''), 'mooc2': 1, 'courseid': course['courseId'],
+        }, stage=stage)
+
+    def current_quiz(self, p, original):
+        session = p['session']
+        course = self.course(session, p['course'])
+        job_id = original['attempt']['paper_id']
+        job = self.job({**p, 'paper_id': job_id})
+        attempt = original['attempt']
+        expected = {'workAnswerId': attempt['id'], 'answerId': attempt['id'], 'jobid': job_id,
+                    'courseId': course['courseId'], 'classId': course['clazzId'], 'cpi': course['cpi'],
+                    'knowledgeid': job['_point']['id']}
+        status, live, score = parser.current_work(self.quiz_page(session, course, job), attempt | {'id': job_id}, expected)
+        if live and (live['attempt']['id'] != attempt['id'] or not live['form'].get('enc_work') or
+                     not live['form'].get('workRelationId') or
+                     live['form']['workRelationId'] != original['form'].get('workRelationId') or
+                     not live['form'].get('totalQuestionNum')):
+            # The web form's totalQuestionNum can be opaque, despite its name.
+            # Require it for temporary save and forward the server value unchanged.
+            return 'unknown', None, None
+        return status, live, score
+
+    def reconcile_quiz(self, p, prefix, reconciled_prefix):
+        session, attempt_id = p['session'], p['attempt_id']
+        original = self.state(session, prefix+attempt_id)
+        if (not original or original.get('submission_confirmed') is not True or original.get('job') != p['paper_id'] or
+                original['attempt']['id'] != attempt_id or original['attempt']['paper_id'] != p['paper_id']):
+            return {'status':'unknown'}
+        state = self.state(session, reconciled_prefix+attempt_id)
+        status, live, score = self.current_quiz(p, original)
+        if live and not (state and state.get('submit_intent')):
+            # A new local write scope for the official current draft; keep the
+            # old attempt and paper rows (and their submission evidence) intact.
+            live.update(job=original['job'], submit_intent=False)
+            self.state(session, reconciled_prefix+attempt_id, live)
+            return {'status':'draft','ready':True,'attempt':live['attempt']}
+        return {'status': 'unknown' if status == 'draft' else status, 'score': score}
+
     def exam(self,method,p):
         session=p['session']; prefix='attempt:'+self.course_key(p['course'])+':'
+        reconciled_prefix='current-draft:'+self.course_key(p['course'])+':'
+        reconciled = p.get('reconciled') is True
+        if method=='exam.reconcile': return self.reconcile_quiz(p,prefix,reconciled_prefix)
         if method=='exam.heartbeat': return {'ok':True}
         if method in ('exam.redo','exam.review'): raise Fault('unsupported_operation','已提交章节测验使用原任务报告查看，不会为查看重新开卷')
         if method=='exam.open':
@@ -522,20 +569,26 @@ class Platform:
             if previous:
                 if previous.get('attempt'): return {'attempt':previous['attempt'],'ready':True}
                 raise Fault('platform_protocol_changed','之前的开卷结果未知，请先在官方页面核对；不会重复开卷')
-            job=self.job(p); course=self.course(session,p['course']); defaults=job['_defaults']
+            job=self.job(p); course=self.course(session,p['course'])
             paper={'id':p['paper_id'],'name':job['property'].get('title') or job['property'].get('name') or p['paper_id']}
             self.state(session,key,{'opening':True})
-            text=self.request(session,BASE+'/mooc-ans/api/work',{'api':1,'workId':job['_jobid'].removeprefix('work-'),'jobid':job['_jobid'],'originJobId':job['_jobid'],'needRedirect':'true','skipHeader':'true','knowledgeid':job['_point']['id'],'ktoken':defaults.get('ktoken',''),'cpi':course['cpi'],'ut':'s','clazzId':course['clazzId'],'type':'','enc':job.get('enc',''),'mooc2':1,'courseid':course['courseId']},stage='open')
+            text=self.quiz_page(session,course,job,stage='open')
             try: value=parser.work(text,paper)
             except ValueError as error: raise Fault('platform_verification_required',str(error))
-            value.update(job=job['_jobid'],paper_key=key,submit_intent=False)
+            # A fresh runtime may encounter a previously submitted answer sheet.
+            # Respect the live page's submission status before any draft write;
+            # a missing mobile job-list session must not turn it back into a draft.
+            confirmed = value.get('submission_confirmed') is True
+            value.update(job=job['_jobid'],paper_key=key,submit_intent=confirmed,submission_confirmed=confirmed)
             self.state(session,key,value); self.state(session,prefix+value['attempt']['id'],value)
             return {'attempt':value['attempt'],'ready':True}
-        key=prefix+str(p.get('attempt_id')); value=self.state(session,key)
+        key=(reconciled_prefix if reconciled else prefix)+str(p.get('attempt_id')); value=self.state(session,key)
         if not value: raise Fault('not_found','找不到原作答，请从原任务继续')
         if method=='exam.write':
             submit=p.get('phase')=='submit'
             retry = p.get('retry') is True
+            if reconciled and retry:
+                raise Fault('platform_protocol_changed', '已核对的当前答卷不会自动补交，请回读结果')
             signature = None
             if retry:
                 if not submit or value.get('submit_retried'):
@@ -551,6 +604,29 @@ class Platform:
                 if submit: raise Fault('platform_protocol_changed','交卷请求已发出，必须先回读；不会重复发送')
                 raise Fault('platform_protocol_changed','交卷后不能再覆盖草稿')
             form=dict(value['form']); answers=p.get('answers') or {}; preserve=set(p.get('preserve_ids') or [])
+            if reconciled:
+                status, live, score = self.current_quiz(p, value)
+                if status in ('submitted', 'below_pass'):
+                    value.update(submission_confirmed=True, submit_intent=True, score=score, below_pass=status == 'below_pass')
+                    self.state(session, key, value)
+                    return {'done':True,'saved':False,'submitted':True,'confirmed':True,'attempt_id':value['attempt']['id']}
+                if not live:
+                    raise Fault('platform_verification_required', '超星未确认同一答卷仍可作答，未写入')
+                old_questions = value['attempt']['questions']
+                latest = live['attempt']['questions']
+                shape = lambda questions: [{k:v for k,v in q.items() if k != 'answer'} for q in questions]
+                if (shape(latest) != shape(old_questions) or live['layout'] != value['layout'] or
+                        any(q['answer'] and q['answer'] != old['answer'] and q['answer'] != answers.get(q['id'])
+                            for old, q in zip(old_questions, latest))):
+                    raise Fault('platform_verification_required', '官方题目或已有答案发生变化，未覆盖原作答')
+                course = self.course(session, p['course'])
+                validation = self.api(session, BASE+'/mooc-ans/work/validate', {
+                    'classId':course['clazzId'], 'courseId':course['courseId'], 'cpi':course['cpi'],
+                    'knowledgeId':live['form']['knowledgeid'],
+                }, referer=BASE+'/')
+                if not isinstance(validation, dict) or str(validation.get('status')) != '3':
+                    raise Fault('platform_verification_required', '请先在超星官方页面核对作答权限或完成验证')
+                form, value['action'] = live['form'], live['action']
             for question in value['attempt']['questions']:
                 ident=question['id']; layout=value['layout'][ident]
                 answer=answers.get(ident,question.get('answer') or [])
@@ -581,21 +657,43 @@ class Platform:
                 if retry:
                     value['submit_retried'] = True
                 self.state(session,key,value)
-            result=self.api(session,value['action'],form,'POST','submit' if submit else 'draft')
+            action = value['action']
+            if reconciled and not submit:
+                # Same temporary-save route and flags as the editable web form.
+                action = BASE+'/mooc-ans/work/addStudentWorkNew?'+urlencode({
+                    '_classId':form['classId'], 'courseid':form['courseId'], 'token':form['enc_work'],
+                    'totalQuestionNum':form['totalQuestionNum'], **WEB_SUBMIT_FLAGS, 'tempsave':'1',
+                })
+            result=self.api(session,action,form,'POST','submit' if submit else 'draft')
             acknowledged = result.get('status') is True or result.get('success') is True
             confirmed = submit and submitted_work(result)
             if not acknowledged and not confirmed:
                 raise Fault('platform_rejected', '平台未确认交卷' if submit else '平台未确认作答保存，请核对官方页面')
-            value.update(form=form, submitted_ack=submit, submission_confirmed=confirmed)
-            self.state(session,key,value); self.state(session,value['paper_key'],value)
+            value.update(form=form, submitted_ack=submit, submission_confirmed=confirmed and not reconciled)
+            if submit and str(result.get('stuStatus')) == '5':
+                value.update(below_pass=True, submission_confirmed=True)
+            self.state(session,key,value)
+            if not reconciled: self.state(session,value['paper_key'],value)
             return {'done':True,'saved':not submit,'submitted':submit}
         if method=='exam.readback':
+            if reconciled:
+                # A previous submission acknowledgement does not prove the live
+                # draft was replaced. Await a fresh exact-sheet read; never re-send.
+                if value.get('submit_intent') and not value.get('submission_confirmed'):
+                    status, _, score = self.current_quiz(p, value)
+                    if status in ('submitted', 'below_pass'):
+                        value.update(submission_confirmed=True, score=score, below_pass=status == 'below_pass')
+                        self.state(session, key, value)
+                return {'confirmed':value.get('submission_confirmed') is True, 'retryable':False,
+                        'attempt_id':value['attempt']['id'], 'graded_answers':{}, 'score':value.get('score'),
+                        **({'passed':False} if value.get('below_pass') else {})}
             status, _ = self.quiz_submission_status(p, value, check_retry=p.get('check_retry') is True)
             if status == 'confirmed' and not value.get('submission_confirmed'):
                 value['submission_confirmed'] = True
                 self.state(session, key, value)
             return {'confirmed':status == 'confirmed','retryable':status == 'retryable',
-                    'attempt_id':value['attempt']['id'],'graded_answers':{},'score':None}
+                    'attempt_id':value['attempt']['id'],'graded_answers':{},'score':None,
+                    **({'passed':False} if value.get('below_pass') else {})}
         raise Fault('unsupported_operation','不支持的作答操作')
 
     def fixture_call(self,method,p):

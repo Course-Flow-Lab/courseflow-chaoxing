@@ -89,7 +89,8 @@ def work(text, paper):
         if element.get('type') in ('radio','checkbox') and element.get('checked') is None:
             continue
         saved[element.get('name')] = element.get('value', plain(element))
-    if saved.get('stuStatus') == '5' or field(root,'stuStatus') == '5':
+    submission_status = saved.get('stuStatus') or field(root, 'stuStatus')
+    if submission_status == '5':
         raise ValueError('作业低于通过线，需要在官方页面处理')
     decode = decoder(text)
     questions, layouts = [], {}
@@ -125,4 +126,40 @@ def work(text, paper):
     if not questions:
         raise ValueError('作业没有可识别的题目')
     ident = saved.get('workAnswerId') or saved.get('id') or saved.get('workId') or paper['id']
-    return {'attempt': {'id': str(ident), 'paper_id': paper['id'], 'name': paper['name'], 'questions': questions, 'expires_at': None}, 'form': saved, 'layout': layouts, 'action': work_action(form.get('action'))}
+    return {'attempt': {'id': str(ident), 'paper_id': paper['id'], 'name': paper['name'], 'questions': questions, 'expires_at': None}, 'form': saved, 'layout': layouts, 'action': work_action(form.get('action')), 'submission_confirmed': submission_status == '4'}
+
+
+def current_work(text, paper, expected):
+    """Prove the state of this exact existing sheet, not just an absent stuStatus."""
+    root = tree(text)
+    unknown = ('unknown', None, None)
+    if any(not value or field(root, key) != value for key, value in expected.items()):
+        return unknown
+    status = field(root, 'stuStatus')
+    if status == '5':
+        return 'below_pass', None, None
+    if root.xpath('.//title[normalize-space()="查看已批阅作业"]') and root.xpath('.//form[@id="questionErrorForm1"]'):
+        scores = [plain(s) for e in cls(root, 'achievement') for s in e.xpath('./i')]
+        score = float(scores[0]) if len(scores) == 1 and re.fullmatch(r'\d+(?:\.\d+)?', scores[0]) else None
+        return 'submitted', None, score
+    if status == '4':
+        return 'submitted', None, None
+    # The web editor exposes the server's submit count. In particular, an empty
+    # status field, an expiry signature, or a generic submit button alone is not proof.
+    forms = root.xpath('.//form')
+    if (status or len(forms) != 1 or forms[0].get('id') != 'form1' or
+            (forms[0].get('method') or '').lower() != 'post' or field(forms[0], 'addTimes') != '0' or
+            not re.fullmatch(r'[1-9]\d*', field(forms[0], 'limitWorkSubmitTimes')) or
+            not any(e.get('onclick') == 'btnBlueSubmit();' and 'disabled' not in e.attrib and
+                    e.get('aria-disabled') != 'true' for e in cls(root, 'btnSubmit'))):
+        return unknown
+    if any(field(forms[0], key) != value for key, value in expected.items()):
+        return unknown
+    action = urlparse(work_action(forms[0].get('action')))
+    if (action.scheme, action.netloc, action.path) != ('https', 'mooc1.chaoxing.com', '/mooc-ans/work/addStudentWorkNewWeb'):
+        return unknown
+    try:
+        value = work(text, paper)
+    except ValueError:
+        return unknown
+    return 'draft', value, None
