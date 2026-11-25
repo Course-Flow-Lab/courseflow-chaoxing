@@ -7,6 +7,7 @@ import sys
 import threading
 import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from cx.platform import Platform, Fault
@@ -41,6 +42,54 @@ class CatalogLatencyTests(unittest.TestCase):
         self.platform.api('s', 'https://mooc1.chaoxing.com/submit', stage='submit')
         self.assertEqual([r['timeout_ms'] for r in self.host.requests], [3000, 10000, 25000])
         self.assertEqual([r['commit'] for r in self.host.requests], [False, False, True])
+
+    def test_transient_read_failure_is_retried_once_including_read_only_post(self):
+        for method in ('GET', 'POST'):
+            with self.subTest(method=method):
+                self.host.requests = []
+                self.host.responses = [Fault('platform_unavailable', '模拟读取超时'), 'recovered']
+                self.assertEqual(self.platform.request('s', 'https://mooc1.chaoxing.com/read', method=method), 'recovered')
+                self.assertEqual(len(self.host.requests), 2)
+                self.assertTrue(all(r['commit'] is False and r['timeout_ms'] == 10000 for r in self.host.requests))
+
+    def test_read_retry_is_bounded_and_never_retries_writes_or_safety_errors(self):
+        self.host.responses = [Fault('platform_unavailable', 'first'), Fault('platform_unavailable', 'last')]
+        with self.assertRaisesRegex(Fault, 'last'):
+            self.platform.request('s', 'https://mooc1.chaoxing.com/read')
+        self.assertEqual(len(self.host.requests), 2)
+        for stage in ('open', 'draft', 'submit', 'study'):
+            for method in ('GET', 'POST'):
+                with self.subTest(stage=stage, method=method):
+                    self.host.requests = []
+                    self.host.responses = [Fault('platform_unavailable', 'unknown write')]
+                    with self.assertRaisesRegex(Fault, 'unknown write'):
+                        self.platform.request('s', 'https://mooc1.chaoxing.com/write', method=method, stage=stage)
+                    self.assertEqual(len(self.host.requests), 1)
+        for code in ('platform_login_expired', 'platform_verification_required', 'platform_rejected',
+                     'platform_protocol_changed', 'task_cancelled', 'quiet_hours', 'net_blocked'):
+            with self.subTest(code=code):
+                self.host.requests = []
+                self.host.responses = [Fault(code, code)]
+                with self.assertRaisesRegex(Fault, code):
+                    self.platform.request('s', 'https://mooc1.chaoxing.com/read')
+                self.assertEqual(len(self.host.requests), 1)
+
+    def test_only_transient_http_statuses_are_retried_and_never_verification_pages(self):
+        for status in (408, 500, 502, 503, 504):
+            with self.subTest(status=status), patch.object(self.host, 'call', side_effect=[
+                    {'status': status, 'body': ''}, {'status': 200, 'body': 'recovered'}]) as fetch:
+                self.assertEqual(self.platform.request('s', 'https://mooc1.chaoxing.com/read'), 'recovered')
+                self.assertEqual(fetch.call_count, 2)
+        for status in (400, 401, 403, 404, 418, 429):
+            with self.subTest(status=status), patch.object(self.host, 'call', return_value={'status': status, 'body': ''}) as fetch:
+                with self.assertRaises(Fault):
+                    self.platform.request('s', 'https://mooc1.chaoxing.com/read')
+                self.assertEqual(fetch.call_count, 1)
+        self.host.requests = []
+        self.host.responses = ['<title>超星登录</title>']
+        with self.assertRaises(Fault):
+            self.platform.request('s', 'https://mooc1.chaoxing.com/read')
+        self.assertEqual(len(self.host.requests), 1)
 
     def test_folder_scan_keeps_the_previous_catalog_until_it_is_complete(self):
         old = {**RAW, 'courseId': '99'}

@@ -110,7 +110,8 @@ class ModuleTests(unittest.TestCase):
             self.p.dispatch('exam.write', {**params, 'attempt_id': '66', 'phase': 'draft', 'answers': {'q1': ['A']}})
         with self.assertRaisesRegex(Fault, '必须先回读'):
             self.p.dispatch('exam.write', {**params, 'attempt_id': '66', 'phase': 'submit', 'answers': {'q1': ['A']}})
-        self.assertEqual(self.p.dispatch('exam.open', params), opened)
+        self.assertNotIn('cached_submission', opened, '新读取的官方已交卷状态不是历史缓存命中')
+        self.assertEqual(self.p.dispatch('exam.open', params), {**opened, 'cached_submission': True})
         self.assertEqual([r['stage'] for r in self.host.requests], ['open'])
 
     def test_live_submission_status_outside_form_is_not_sent_as_an_answer_field(self):
@@ -132,6 +133,7 @@ class ModuleTests(unittest.TestCase):
         self.assertFalse(value['submission_confirmed'])
         self.assertFalse(value['submit_intent'])
         self.assertEqual(value['attempt']['questions'][0]['answer'], ['B'])
+        self.assertNotIn('cached_submission', self.p.dispatch('exam.open', {'session': 's', 'course': COURSE, 'paper_id': 'work-55'}))
 
     def historical_quiz(self):
         paper = {'id':'work-55','name':'合成测验'}

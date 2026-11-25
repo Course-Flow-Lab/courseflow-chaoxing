@@ -2,6 +2,7 @@ import base64
 import hashlib
 import json
 import re
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -71,18 +72,28 @@ class Platform:
                   'timeout_ms': 3000 if optional else 10000 if stage == 'read' else 25000}
         if data is not None:
             params.update(encoding='form' if method == 'POST' else 'query', body={k: 'true' if v is True else 'false' if v is False else '' if v is None else str(v) for k,v in data.items()})
-        try:
-            response = self.host.call('cw.net.fetch', params)
-            status = response['status']
-            if status != 200:
-                raise Fault('platform_unavailable', f'超星接口暂不可用（HTTP {status}）')
-            body = response.get('body', '')
-            if not binary and ('antispiderShowVerify' in body or re.search(r'<title>\s*(?:超星)?登录', body)):
-                raise Fault('platform_verification_required', '请在超星官方页面完成验证后继续')
-            return body
-        except Fault:
-            if optional: return None
-            raise
+        # Only explicit reads may be replayed. A GET can still be a learning
+        # write, and an open/draft/submit timeout always has an unknown result.
+        attempts = 2 if stage == 'read' and not optional else 1
+        for attempt in range(attempts):
+            transient = True
+            try:
+                response = self.host.call('cw.net.fetch', params)
+                status = response['status']
+                if status != 200:
+                    transient = status in (408, 500, 502, 503, 504)
+                    raise Fault('platform_unavailable', f'超星接口暂不可用（HTTP {status}）')
+                body = response.get('body', '')
+                if not binary and ('antispiderShowVerify' in body or re.search(r'<title>\s*(?:超星)?登录', body)):
+                    raise Fault('platform_verification_required', '请在超星官方页面完成验证后继续')
+                return body
+            except Fault as error:
+                if optional: return None
+                if attempt + 1 >= attempts or not transient or error.code != 'platform_unavailable':
+                    raise
+                # Host.call retains the original RPC deadline and rechecks the
+                # task capability before the retry; this never resets its budget.
+                time.sleep(.25)
 
     def api(self, session, url, data=None, method='GET', stage='read', mobile=False, optional=False, referer=None):
         body = self.request(session,url,data,method,stage,mobile=mobile,optional=optional,referer=referer)
@@ -567,7 +578,9 @@ class Platform:
         if method=='exam.open':
             key='paper:'+self.course_key(p['course'])+':'+str(p['paper_id']); previous=self.state(session,key)
             if previous:
-                if previous.get('attempt'): return {'attempt':previous['attempt'],'ready':True}
+                if previous.get('attempt'):
+                    return {'attempt':previous['attempt'],'ready':True,
+                            **({'cached_submission':True} if previous.get('submission_confirmed') is True else {})}
                 raise Fault('platform_protocol_changed','之前的开卷结果未知，请先在官方页面核对；不会重复开卷')
             job=self.job(p); course=self.course(session,p['course'])
             paper={'id':p['paper_id'],'name':job['property'].get('title') or job['property'].get('name') or p['paper_id']}
